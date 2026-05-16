@@ -1,10 +1,15 @@
 services:
   - type: cron
     name: gold-bot-cron
-    schedule: "*/2 * * * *"  # Runs every 2 minutes
+    schedule: "*/2 * * * *"
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      python --version
+      pip install --upgrade pip setuptools wheel
+      pip install numpy==1.24.3
+      pip install requests==2.31.0
+      pip install yfinance==0.2.28
     startCommand: python gold_bot.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.11.10
