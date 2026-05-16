@@ -1,5 +1,4 @@
 import yfinance as yf
-import pandas as pd
 import numpy as np
 import requests
 import logging
@@ -9,222 +8,204 @@ from datetime import datetime
 # ------------------------------
 # CONFIGURATION
 # ------------------------------
-TELEGRAM_TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your bot token from BotFather
-CHAT_ID = 'YOUR_CHAT_ID'  # Replace with your Telegram Chat ID
-SYMBOL = "GC=F"  # Ticker for Gold on Yahoo Finance
-CAPITAL = 10000  # Total position value ($10,000)
-RISK_PERCENT = 0.5  # Risk 0.5% of position ($50)
-REWARD_PERCENT = 1.0  # Target 1% of position ($100)
-
-# Technical Analysis Parameters
+TELEGRAM_TOKEN = 'YOUR_BOT_TOKEN'
+CHAT_ID = 'YOUR_CHAT_ID'
+SYMBOL = "GC=F"
+CAPITAL = 10000
+RISK_PERCENT = 0.5
+REWARD_PERCENT = 1.0
 EMA_SHORT = 50
 EMA_LONG = 200
 ADX_PERIOD = 14
 
-# Track sent signals to avoid duplicates (store last signal timestamp)
-LAST_SIGNAL_FILE = "/tmp/last_gold_signal.txt"  # Use /tmp for Render ephemeral storage
+LAST_SIGNAL_FILE = "/tmp/last_gold_signal.txt"
 
-# Setup Logging
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 def send_telegram_message(text):
-    """Sends a message to the configured Telegram chat."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
-        logging.info("Telegram message sent successfully")
+        logging.info("Telegram message sent")
         return True
     except Exception as e:
         logging.error(f"Failed to send message: {e}")
         return False
 
-def get_last_signal_time():
-    """Read the timestamp of the last sent signal to avoid duplicates."""
-    try:
-        with open(LAST_SIGNAL_FILE, 'r') as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return None
-
-def save_signal_time(timestamp):
-    """Save the timestamp of the current signal."""
-    try:
-        with open(LAST_SIGNAL_FILE, 'w') as f:
-            f.write(timestamp)
-    except Exception as e:
-        logging.error(f"Failed to save signal time: {e}")
-
-def calculate_adx(data, period=14):
-    """Calculates ADX (Average Directional Index) for trend strength."""
-    high, low, close = data['High'], data['Low'], data['Close']
+def calculate_ema(data, period):
+    """Calculate EMA without pandas using recursive formula"""
+    ema = []
+    multiplier = 2 / (period + 1)
     
-    # Calculate +DM and -DM
-    up_move = high.diff()
-    down_move = low.diff().abs()
-    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+    # Start with SMA for first value
+    if len(data) < period:
+        return [None] * len(data)
     
-    # Calculate True Range
-    prev_close = close.shift(1)
-    tr1 = high - low
-    tr2 = (high - prev_close).abs()
-    tr3 = (low - prev_close).abs()
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    sma = sum(data[:period]) / period
+    ema.append(sma)
+    
+    # Calculate EMA recursively
+    for price in data[period:]:
+        ema_value = (price - ema[-1]) * multiplier + ema[-1]
+        ema.append(ema_value)
+    
+    # Pad the beginning with None
+    return [None] * (period - 1) + ema
+
+def calculate_adx(high, low, close, period=14):
+    """Calculate ADX without pandas"""
+    n = len(close)
+    if n < period + 1:
+        return 0, 0, 0
+    
+    plus_dm = [0] * n
+    minus_dm = [0] * n
+    tr = [0] * n
+    
+    for i in range(1, n):
+        # Calculate +DM and -DM
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        else:
+            plus_dm[i] = 0
+            
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+        else:
+            minus_dm[i] = 0
+        
+        # Calculate True Range
+        tr1 = high[i] - low[i]
+        tr2 = abs(high[i] - close[i-1])
+        tr3 = abs(low[i] - close[i-1])
+        tr[i] = max(tr1, tr2, tr3)
     
     # Smooth values (Wilder's smoothing)
-    atr = true_range.rolling(window=period).mean()
-    smooth_plus_dm = plus_dm.rolling(window=period).mean()
-    smooth_minus_dm = minus_dm.rolling(window=period).mean()
+    atr = [0] * n
+    smooth_plus_dm = [0] * n
+    smooth_minus_dm = [0] n
+    
+    # First values are averages
+    atr[period-1] = sum(tr[1:period]) / period
+    smooth_plus_dm[period-1] = sum(plus_dm[1:period]) / period
+    smooth_minus_dm[period-1] = sum(minus_dm[1:period]) / period
+    
+    # Wilder's smoothing
+    for i in range(period, n):
+        atr[i] = (atr[i-1] * (period - 1) + tr[i]) / period
+        smooth_plus_dm[i] = (smooth_plus_dm[i-1] * (period - 1) + plus_dm[i]) / period
+        smooth_minus_dm[i] = (smooth_minus_dm[i-1] * (period - 1) + minus_dm[i]) / period
     
     # Calculate +DI and -DI
-    plus_di = 100 * (smooth_plus_dm / atr)
-    minus_di = 100 * (smooth_minus_dm / atr)
+    plus_di = [0] * n
+    minus_di = [0] * n
+    for i in range(period, n):
+        if atr[i] != 0:
+            plus_di[i] = 100 * (smooth_plus_dm[i] / atr[i])
+            minus_di[i] = 100 * (smooth_minus_dm[i] / atr[i])
     
     # Calculate DX and ADX
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di))
-    adx = dx.rolling(window=period).mean()
+    dx = [0] * n
+    for i in range(period, n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum != 0:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
     
-    return adx.iloc[-1], plus_di.iloc[-1], minus_di.iloc[-1]
+    # Smooth DX to get ADX
+    adx = [0] * n
+    adx[period*2-2] = sum(dx[period-1:period*2-1]) / period
+    
+    for i in range(period*2-1, n):
+        adx[i] = (adx[i-1] * (period - 1) + dx[i]) / period
+    
+    return adx[-1], plus_di[-1], minus_di[-1]
 
 def check_gold_signal():
-    """Main logic: Fetches data, calculates indicators, and decides on a signal."""
     logging.info(f"Scanning {SYMBOL} on 10-minute timeframe...")
     
-    # Download enough data for EMA200 (need at least 200 candles)
-    # For 10-min candles: 200 candles = ~33 hours, so download 7 days to be safe
+    # Download data
     df = yf.download(SYMBOL, period="7d", interval="10m", progress=False, auto_adjust=False)
     
     if df.empty:
-        logging.error("No data retrieved from Yahoo Finance")
+        logging.error("No data retrieved")
         return None
     
-    # Remove any NaN values from the beginning
-    df = df.dropna()
+    # Extract data as lists (no pandas needed)
+    close_prices = df['Close'].tolist()
+    high_prices = df['High'].tolist()
+    low_prices = df['Low'].tolist()
     
-    if len(df) < EMA_LONG + 10:
-        logging.warning(f"Insufficient data: only {len(df)} candles available. Need at least {EMA_LONG + 10}")
+    if len(close_prices) < EMA_LONG + 10:
+        logging.warning(f"Insufficient data: {len(close_prices)} candles")
         return None
     
     # Calculate EMAs
-    df['EMA50'] = df['Close'].ewm(span=EMA_SHORT, adjust=False).mean()
-    df['EMA200'] = df['Close'].ewm(span=EMA_LONG, adjust=False).mean()
+    ema50 = calculate_ema(close_prices, EMA_SHORT)
+    ema200 = calculate_ema(close_prices, EMA_LONG)
     
-    # Get current and previous values (last two candles)
-    current_ema50 = df['EMA50'].iloc[-1]
-    current_ema200 = df['EMA200'].iloc[-1]
-    prev_ema50 = df['EMA50'].iloc[-2]
-    prev_ema200 = df['EMA200'].iloc[-2]
-    current_price = df['Close'].iloc[-1]
+    # Get current and previous values
+    current_ema50 = ema50[-1]
+    current_ema200 = ema200[-1]
+    prev_ema50 = ema50[-2]
+    prev_ema200 = ema200[-2]
+    current_price = close_prices[-1]
     current_time = df.index[-1]
     
-    # Get high/low for the current candle
-    current_high = df['High'].iloc[-1]
-    current_low = df['Low'].iloc[-1]
+    # Calculate ADX
+    adx_value, plus_di, minus_di = calculate_adx(high_prices, low_prices, close_prices, ADX_PERIOD)
     
-    # Calculate ADX (using full dataset)
-    adx_value, plus_di, minus_di = calculate_adx(df, ADX_PERIOD)
-    
-    # Determine Crossover Type
+    # Detect crossover
     signal = None
-    crossover_type = None
-    
-    if prev_ema50 <= prev_ema200 and current_ema50 > current_ema200:
-        signal = "BUY"
-        crossover_type = "Golden Cross (Bullish)"
-        logging.info(f"BUY signal detected at {current_time}")
-    elif prev_ema50 >= prev_ema200 and current_ema50 < current_ema200:
-        signal = "SELL"
-        crossover_type = "Death Cross (Bearish)"
-        logging.info(f"SELL signal detected at {current_time}")
+    if (prev_ema50 is not None and prev_ema200 is not None and 
+        current_ema50 is not None and current_ema200 is not None):
+        
+        if prev_ema50 <= prev_ema200 and current_ema50 > current_ema200:
+            signal = "BUY"
+        elif prev_ema50 >= prev_ema200 and current_ema50 < current_ema200:
+            signal = "SELL"
     
     if signal:
-        # Check if we already sent a signal for this candle
-        signal_key = f"{signal}_{current_time}"
-        last_signal = get_last_signal_time()
-        
-        if last_signal == signal_key:
-            logging.info(f"Duplicate signal prevented for {signal_key}")
-            return None
-        
-        # --- Position Sizing & Risk Management ---
+        # Send message (same as before)
         if signal == "BUY":
             stop_loss = current_price * (1 - RISK_PERCENT / 100)
             take_profit = current_price * (1 + REWARD_PERCENT / 100)
-            direction_text = "LONG (Buying)"
-        else:  # SELL
+            direction_text = "LONG"
+        else:
             stop_loss = current_price * (1 + RISK_PERCENT / 100)
             take_profit = current_price * (1 - REWARD_PERCENT / 100)
-            direction_text = "SHORT (Selling)"
+            direction_text = "SHORT"
         
-        # Calculate Quantity based on Position Size ($10,000)
         quantity = CAPITAL / current_price
-        risk_amount = CAPITAL * (RISK_PERCENT / 100)  # $50
-        reward_amount = risk_amount * 2  # $100
+        risk_amount = CAPITAL * (RISK_PERCENT / 100)
         
-        # --- Compose Message ---
-        adx_status = "🔥 Strong Trend" if adx_value > 25 else "⚠️ Weak/Ranging" if adx_value < 20 else "📊 Moderate Trend"
+        adx_status = "🔥 Strong" if adx_value > 25 else "⚠️ Weak" if adx_value < 20 else "📊 Moderate"
         
-        # Format time nicely
-        time_str = current_time.strftime("%Y-%m-%d %H:%M UTC")
-        
-        message = (
-            f"🚨 <b>TRADE SIGNAL: {signal}</b> 🚨\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏰ <b>Time:</b> {time_str}\n"
-            f"⏱️ <b>Timeframe:</b> 10 Minutes\n"
-            f"💰 <b>Asset:</b> Gold (XAU/USD)\n"
-            f"📈 <b>Signal:</b> {signal} - {crossover_type}\n"
-            f"💵 <b>Entry Price:</b> ${current_price:.2f}\n"
-            f"📊 <b>Range:</b> H: ${current_high:.2f} | L: ${current_low:.2f}\n"
-            f"🛑 <b>Stop Loss:</b> ${stop_loss:.2f} ({RISK_PERCENT}% risk)\n"
-            f"🎯 <b>Take Profit:</b> ${take_profit:.2f} ({REWARD_PERCENT}% gain)\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 <b>Technical Context:</b>\n"
-            f"• EMA50: {current_ema50:.2f}\n"
-            f"• EMA200: {current_ema200:.2f}\n"
-            f"• Difference: {((current_ema50 - current_ema200)/current_ema200*100):.2f}%\n"
-            f"• ADX: {adx_value:.1f} ({adx_status})\n"
-            f"• +DI: {plus_di:.1f} | -DI: {minus_di:.1f}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💼 <b>Risk Management (1:2 R:R)</b>\n"
-            f"• Position Size: ${CAPITAL:,}\n"
-            f"• Quantity: {quantity:.4f} units\n"
-            f"• Risk: ${risk_amount:.2f} | Reward: ${reward_amount:.2f}\n"
-            f"• R:R Ratio: 1:2 ✅\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>⚡ Always use stop losses. Past signals don't guarantee future results.</i>"
-        )
-        
-        # Send the message
-        if send_telegram_message(message):
-            save_signal_time(signal_key)
-            logging.info(f"Signal sent successfully: {signal} at ${current_price:.2f}")
-            return signal
-        
-    else:
-        logging.info("No crossover detected in current candle")
-        return None
+        message = f"""
+🚨 <b>TRADE SIGNAL: {signal}</b> 🚨
+━━━━━━━━━━━━━━━━━━━━
+💰 <b>Asset:</b> Gold (XAU/USD)
+💵 <b>Entry:</b> ${current_price:.2f}
+🛑 <b>Stop:</b> ${stop_loss:.2f} ({RISK_PERCENT}%)
+🎯 <b>Target:</b> ${take_profit:.2f} ({REWARD_PERCENT}%)
+━━━━━━━━━━━━━━━━━━━━
+📊 <b>Technical:</b>
+• EMA50: {current_ema50:.2f}
+• EMA200: {current_ema200:.2f}
+• ADX: {adx_value:.1f} ({adx_status})
+━━━━━━━━━━━━━━━━━━━━
+💼 <b>Risk: ${risk_amount:.2f}</b> | <b>Reward: ${risk_amount*2:.2f}</b>
+<i>1:2 Risk/Reward | Position: ${CAPITAL:,}</i>
+"""
+        send_telegram_message(message)
+        return signal
+    
+    return None
 
 if __name__ == "__main__":
-    logging.info(f"Gold Bot starting (10-min timeframe mode)")
-    logging.info(f"Checking for EMA{EMA_SHORT}/{EMA_LONG} crossover on {SYMBOL}")
-    
-    try:
-        signal_result = check_gold_signal()
-        
-        # Exit codes for cron monitoring
-        if signal_result:
-            logging.info(f"Signal generated: {signal_result}")
-            sys.exit(0)  # Success with signal
-        else:
-            logging.info("No signal generated")
-            sys.exit(1)  # No signal (not an error, just expected)
-            
-    except Exception as e:
-        logging.error(f"Critical error in bot execution: {e}", exc_info=True)
-        sys.exit(2)  # Error occurred
+    logging.info("Gold Bot starting (pandas-free version)")
+    check_gold_signal()
