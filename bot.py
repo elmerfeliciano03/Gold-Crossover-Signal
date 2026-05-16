@@ -2,9 +2,8 @@ import yfinance as yf
 import requests
 import logging
 import sys
-import json
+import time
 from datetime import datetime
-from collections import deque
 
 # ------------------------------
 # CONFIGURATION
@@ -139,27 +138,64 @@ def calculate_adx(high, low, close, period=14):
     
     return adx[-1], plus_di[-1], minus_di[-1]
 
+def fetch_with_retry(max_retries=3, delay=5):
+    """Fetch data with retry logic for transient errors"""
+    for attempt in range(max_retries):
+        try:
+            logging.info(f"Fetching data for {SYMBOL} (attempt {attempt + 1}/{max_retries})")
+            
+            # Use Ticker object instead of download for better error handling
+            ticker = yf.Ticker(SYMBOL)
+            df = ticker.history(period="7d", interval="10m")
+            
+            # Critical: Always check if DataFrame is empty[citation:9]
+            if df.empty:
+                logging.warning(f"Empty DataFrame returned for {SYMBOL}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    continue
+                return None
+            
+            # Additional validation - check if we have enough data
+            if len(df) < EMA_LONG + 10:
+                logging.warning(f"Insufficient data: {len(df)} candles, need {EMA_LONG + 10}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    continue
+                return None
+            
+            logging.info(f"Successfully fetched {len(df)} candles")
+            return df
+            
+        except Exception as e:
+            logging.error(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt < max_retries - 1:
+                logging.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                logging.error("Max retries exceeded")
+                return None
+    
+    return None
+
 def check_gold_signal():
-    """Main monitoring function"""
+    """Main monitoring function with robust error handling"""
     logging.info(f"Scanning {SYMBOL} on 10-min timeframe...")
     
+    # Fetch data with retry logic
+    df = fetch_with_retry(max_retries=3, delay=5)
+    
+    if df is None:
+        logging.error("Failed to fetch data after retries")
+        # Send alert about API issues (optional)
+        send_telegram_message("⚠️ <b>Gold Bot Warning</b>\nUnable to fetch data from Yahoo Finance. This is usually temporary. The bot will retry on next schedule.")
+        return None
+    
     try:
-        # Download data
-        ticker = yf.Ticker(SYMBOL)
-        df = ticker.history(period="7d", interval="10m")
-        
-        if df.empty:
-            logging.error("No data retrieved")
-            return None
-        
         # Extract data as lists
         close_prices = df['Close'].tolist()
         high_prices = df['High'].tolist()
         low_prices = df['Low'].tolist()
-        
-        if len(close_prices) < EMA_LONG + 20:
-            logging.warning(f"Insufficient data: {len(close_prices)} candles")
-            return None
         
         # Calculate EMAs
         ema50 = calculate_ema(close_prices, EMA_SHORT)
@@ -189,11 +225,11 @@ def check_gold_signal():
         if prev_ema50 <= prev_ema200 and current_ema50 > current_ema200:
             signal = "BUY"
             crossover_type = "Golden Cross ↑"
-            logging.info(f"BUY signal detected at {current_price:.2f}")
+            logging.info(f"BUY signal detected at ${current_price:.2f}")
         elif prev_ema50 >= prev_ema200 and current_ema50 < current_ema200:
             signal = "SELL"
             crossover_type = "Death Cross ↓"
-            logging.info(f"SELL signal detected at {current_price:.2f}")
+            logging.info(f"SELL signal detected at ${current_price:.2f}")
         
         if signal:
             # Check for duplicate signals
@@ -267,7 +303,7 @@ def check_gold_signal():
         return None
 
 if __name__ == "__main__":
-    logging.info("Gold Bot starting (Python 3.11+ compatible)")
+    logging.info("Gold Bot starting with retry logic")
     logging.info(f"Monitoring {SYMBOL} for EMA{EMA_SHORT}/{EMA_LONG} crossover")
     
     result = check_gold_signal()
