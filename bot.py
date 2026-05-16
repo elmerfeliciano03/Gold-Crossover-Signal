@@ -1,4 +1,3 @@
-import yfinance as yf
 import requests
 import logging
 import sys
@@ -10,7 +9,7 @@ from datetime import datetime
 # ------------------------------
 TELEGRAM_TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your bot token
 CHAT_ID = 'YOUR_CHAT_ID'  # Replace with your Chat ID
-SYMBOL = "GC=F"
+ALPHA_VANTAGE_KEY = 'YOUR_API_KEY'  # Get from https://www.alphavantage.co/support/#api-key
 CAPITAL = 10000
 RISK_PERCENT = 0.5
 REWARD_PERCENT = 1.0
@@ -138,134 +137,232 @@ def calculate_adx(high, low, close, period=14):
     
     return adx[-1], plus_di[-1], minus_di[-1]
 
-def fetch_with_retry(max_retries=3, delay=5):
-    """Fetch data with retry logic for transient errors"""
-    for attempt in range(max_retries):
-        try:
-            logging.info(f"Fetching data for {SYMBOL} (attempt {attempt + 1}/{max_retries})")
-            
-            # Use Ticker object instead of download for better error handling
-            ticker = yf.Ticker(SYMBOL)
-            df = ticker.history(period="7d", interval="10m")
-            
-            # Critical: Always check if DataFrame is empty[citation:9]
-            if df.empty:
-                logging.warning(f"Empty DataFrame returned for {SYMBOL}")
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    continue
-                return None
-            
-            # Additional validation - check if we have enough data
-            if len(df) < EMA_LONG + 10:
-                logging.warning(f"Insufficient data: {len(df)} candles, need {EMA_LONG + 10}")
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    continue
-                return None
-            
-            logging.info(f"Successfully fetched {len(df)} candles")
-            return df
-            
-        except Exception as e:
-            logging.error(f"Attempt {attempt + 1} failed: {str(e)}")
-            if attempt < max_retries - 1:
-                logging.info(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
-                logging.error("Max retries exceeded")
-                return None
-    
-    return None
-
-def check_gold_signal():
-    """Main monitoring function with robust error handling"""
-    logging.info(f"Scanning {SYMBOL} on 10-min timeframe...")
-    
-    # Fetch data with retry logic
-    df = fetch_with_retry(max_retries=3, delay=5)
-    
-    if df is None:
-        logging.error("Failed to fetch data after retries")
-        # Send alert about API issues (optional)
-        send_telegram_message("⚠️ <b>Gold Bot Warning</b>\nUnable to fetch data from Yahoo Finance. This is usually temporary. The bot will retry on next schedule.")
-        return None
-    
+def fetch_gold_data_alphavantage():
+    """Fetch gold data from Alpha Vantage"""
     try:
-        # Extract data as lists
-        close_prices = df['Close'].tolist()
-        high_prices = df['High'].tolist()
-        low_prices = df['Low'].tolist()
+        # Alpha Vantage endpoint for gold (using FX symbol XAUUSD)
+        url = f"https://www.alphavantage.co/query"
+        params = {
+            "function": "FX_INTRADAY",
+            "from_symbol": "XAU",
+            "to_symbol": "USD",
+            "interval": "10min",
+            "apikey": ALPHA_VANTAGE_KEY,
+            "outputsize": "compact"  # Get latest 100 data points
+        }
         
-        # Calculate EMAs
-        ema50 = calculate_ema(close_prices, EMA_SHORT)
-        ema200 = calculate_ema(close_prices, EMA_LONG)
+        logging.info("Fetching data from Alpha Vantage...")
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
         
-        # Get current values (last 2 candles)
-        current_ema50 = ema50[-1]
-        current_ema200 = ema200[-1]
-        prev_ema50 = ema50[-2]
-        prev_ema200 = ema200[-2]
-        current_price = close_prices[-1]
-        current_high = high_prices[-1]
-        current_low = low_prices[-1]
+        data = response.json()
         
-        # Calculate ADX
-        adx, plus_di, minus_di = calculate_adx(high_prices, low_prices, close_prices, ADX_PERIOD)
-        
-        # Check for crossover (ignore None values)
-        if None in [current_ema50, current_ema200, prev_ema50, prev_ema200]:
-            logging.info("Insufficient data for EMA calculation")
+        # Check for error messages
+        if "Error Message" in data:
+            logging.error(f"Alpha Vantage API error: {data['Error Message']}")
+            return None
+            
+        if "Note" in data:
+            logging.warning(f"API rate limit: {data['Note']}")
             return None
         
-        # Detect signals
-        signal = None
-        crossover_type = None
+        # Extract time series data
+        time_series_key = "Time Series FX (10min)"
+        if time_series_key not in data:
+            logging.error(f"Unexpected response format: {list(data.keys())}")
+            return None
+            
+        time_series = data[time_series_key]
         
-        if prev_ema50 <= prev_ema200 and current_ema50 > current_ema200:
-            signal = "BUY"
-            crossover_type = "Golden Cross ↑"
-            logging.info(f"BUY signal detected at ${current_price:.2f}")
-        elif prev_ema50 >= prev_ema200 and current_ema50 < current_ema200:
-            signal = "SELL"
-            crossover_type = "Death Cross ↓"
-            logging.info(f"SELL signal detected at ${current_price:.2f}")
+        # Parse data into lists (most recent first)
+        timestamps = []
+        opens = []
+        highs = []
+        lows = []
+        closes = []
         
-        if signal:
-            # Check for duplicate signals
-            signal_key = f"{signal}_{df.index[-1]}"
-            try:
-                with open(LAST_SIGNAL_FILE, 'r') as f:
-                    last_signal = f.read().strip()
-                    if last_signal == signal_key:
-                        logging.info("Duplicate signal prevented")
-                        return None
-            except FileNotFoundError:
-                pass
+        for timestamp, values in sorted(time_series.items(), reverse=True):
+            timestamps.append(timestamp)
+            opens.append(float(values['1. open']))
+            highs.append(float(values['2. high']))
+            lows.append(float(values['3. low']))
+            closes.append(float(values['4. close']))
+        
+        # Reverse to get chronological order (oldest first)
+        timestamps.reverse()
+        opens.reverse()
+        highs.reverse()
+        lows.reverse()
+        closes.reverse()
+        
+        logging.info(f"Successfully fetched {len(closes)} candles")
+        
+        return {
+            'timestamps': timestamps,
+            'open': opens,
+            'high': highs,
+            'low': lows,
+            'close': closes
+        }
+        
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Network error: {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Error fetching data: {e}", exc_info=True)
+        return None
+
+def fetch_gold_data_alternative():
+    """Fallback: Use Twelve Data API (free tier available)"""
+    try:
+        # Twelve Data API (requires free registration)
+        # Sign up at https://twelvedata.com/apikey
+        TWELVE_DATA_KEY = "YOUR_TWELVE_DATA_KEY"  # Optional fallback
+        
+        url = f"https://api.twelvedata.com/time_series"
+        params = {
+            "symbol": "XAU/USD",
+            "interval": "10min",
+            "apikey": TWELVE_DATA_KEY,
+            "outputsize": "200"
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "values" not in data:
+            logging.error(f"Twelve Data error: {data.get('message', 'Unknown error')}")
+            return None
             
-            # Calculate risk management
-            if signal == "BUY":
-                stop_loss = current_price * (1 - RISK_PERCENT / 100)
-                take_profit = current_price * (1 + REWARD_PERCENT / 100)
-            else:
-                stop_loss = current_price * (1 + RISK_PERCENT / 100)
-                take_profit = current_price * (1 - REWARD_PERCENT / 100)
-            
-            quantity = CAPITAL / current_price
-            risk_amount = CAPITAL * (RISK_PERCENT / 100)
-            
-            # ADX interpretation
-            if adx > 25:
-                adx_status = "🔥 STRONG TREND"
-            elif adx < 20:
-                adx_status = "⚠️ WEAK/RANGING"
-            else:
-                adx_status = "📊 MODERATE TREND"
-            
-            # Build message
-            message = f"""🚨 <b>TRADE SIGNAL: {signal}</b> 🚨
+        values = data['values']
+        
+        highs = []
+        lows = []
+        closes = []
+        
+        for candle in values:
+            highs.append(float(candle['high']))
+            lows.append(float(candle['low']))
+            closes.append(float(candle['close']))
+        
+        # Reverse to chronological order
+        highs.reverse()
+        lows.reverse()
+        closes.reverse()
+        
+        logging.info(f"Successfully fetched {len(closes)} candles from Twelve Data")
+        
+        return {
+            'high': highs,
+            'low': lows,
+            'close': closes
+        }
+        
+    except Exception as e:
+        logging.error(f"Twelve Data fallback failed: {e}")
+        return None
+
+def check_gold_signal():
+    """Main monitoring function with Alpha Vantage"""
+    logging.info(f"Scanning Gold on 10-min timeframe...")
+    
+    # Fetch data from Alpha Vantage
+    data = fetch_gold_data_alphavantage()
+    
+    if data is None:
+        logging.error("Failed to fetch data from primary source")
+        # Try fallback if available
+        data = fetch_gold_data_alternative()
+        
+    if data is None:
+        logging.error("Failed to fetch data from all sources")
+        send_telegram_message("⚠️ <b>Gold Bot Warning</b>\nUnable to fetch price data. Will retry on next schedule.")
+        return None
+    
+    close_prices = data['close']
+    high_prices = data['high']
+    low_prices = data['low']
+    
+    if len(close_prices) < EMA_LONG + 20:
+        logging.warning(f"Insufficient data: {len(close_prices)} candles, need {EMA_LONG + 20}")
+        return None
+    
+    # Calculate EMAs
+    ema50 = calculate_ema(close_prices, EMA_SHORT)
+    ema200 = calculate_ema(close_prices, EMA_LONG)
+    
+    # Get current values (last 2 candles)
+    current_ema50 = ema50[-1]
+    current_ema200 = ema200[-1]
+    prev_ema50 = ema50[-2]
+    prev_ema200 = ema200[-2]
+    current_price = close_prices[-1]
+    current_high = high_prices[-1]
+    current_low = low_prices[-1]
+    
+    # Get current timestamp
+    if 'timestamps' in data and data['timestamps']:
+        current_time = data['timestamps'][-1]
+    else:
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Calculate ADX
+    adx, plus_di, minus_di = calculate_adx(high_prices, low_prices, close_prices, ADX_PERIOD)
+    
+    # Check for crossover
+    if None in [current_ema50, current_ema200, prev_ema50, prev_ema200]:
+        logging.info("Insufficient data for EMA calculation")
+        return None
+    
+    # Detect signals
+    signal = None
+    crossover_type = None
+    
+    if prev_ema50 <= prev_ema200 and current_ema50 > current_ema200:
+        signal = "BUY"
+        crossover_type = "Golden Cross ↑"
+        logging.info(f"BUY signal detected at ${current_price:.2f}")
+    elif prev_ema50 >= prev_ema200 and current_ema50 < current_ema200:
+        signal = "SELL"
+        crossover_type = "Death Cross ↓"
+        logging.info(f"SELL signal detected at ${current_price:.2f}")
+    
+    if signal:
+        # Check for duplicate signals
+        signal_key = f"{signal}_{current_time}"
+        try:
+            with open(LAST_SIGNAL_FILE, 'r') as f:
+                last_signal = f.read().strip()
+                if last_signal == signal_key:
+                    logging.info("Duplicate signal prevented")
+                    return None
+        except FileNotFoundError:
+            pass
+        
+        # Calculate risk management
+        if signal == "BUY":
+            stop_loss = current_price * (1 - RISK_PERCENT / 100)
+            take_profit = current_price * (1 + REWARD_PERCENT / 100)
+        else:
+            stop_loss = current_price * (1 + RISK_PERCENT / 100)
+            take_profit = current_price * (1 - REWARD_PERCENT / 100)
+        
+        quantity = CAPITAL / current_price
+        risk_amount = CAPITAL * (RISK_PERCENT / 100)
+        
+        # ADX interpretation
+        if adx > 25:
+            adx_status = "🔥 STRONG TREND"
+        elif adx < 20:
+            adx_status = "⚠️ WEAK/RANGING"
+        else:
+            adx_status = "📊 MODERATE TREND"
+        
+        # Build message
+        message = f"""🚨 <b>TRADE SIGNAL: {signal}</b> 🚨
 ━━━━━━━━━━━━━━━━━━━━
-⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
+⏰ <b>Time:</b> {current_time}
 💰 <b>Asset:</b> Gold (XAU/USD)
 📈 <b>Signal:</b> {signal} - {crossover_type}
 💵 <b>Entry:</b> ${current_price:.2f}
@@ -287,28 +384,22 @@ def check_gold_signal():
 • R:R Ratio: 1:2 ✅
 ━━━━━━━━━━━━━━━━━━━━
 <i>⚡ Always use stop losses. Not financial advice.</i>"""
-            
-            # Send message
-            if send_telegram_message(message):
-                with open(LAST_SIGNAL_FILE, 'w') as f:
-                    f.write(signal_key)
-                logging.info(f"Signal sent: {signal}")
-                return signal
         
-        logging.info("No crossover detected")
-        return None
-        
-    except Exception as e:
-        logging.error(f"Error in check_gold_signal: {e}", exc_info=True)
-        return None
+        # Send message
+        if send_telegram_message(message):
+            with open(LAST_SIGNAL_FILE, 'w') as f:
+                f.write(signal_key)
+            logging.info(f"Signal sent: {signal}")
+            return signal
+    
+    logging.info("No crossover detected")
+    return None
 
 if __name__ == "__main__":
-    logging.info("Gold Bot starting with retry logic")
-    logging.info(f"Monitoring {SYMBOL} for EMA{EMA_SHORT}/{EMA_LONG} crossover")
+    logging.info("Gold Bot starting with Alpha Vantage API")
     
     result = check_gold_signal()
     
-    # Exit codes for monitoring
     if result:
         sys.exit(0)
     else:
