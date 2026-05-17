@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import time
 import yfinance as yf
 import json
+import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -17,19 +18,20 @@ log = logging.getLogger(__name__)
 # ============ CONFIGURATION ============
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")  # Optional backup
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     log.error("❌ Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
     exit(1)
 
-# Cooldown file (prevents duplicate signals)
+# Cooldown file
 COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
 SIGNAL_COOLDOWN = 43200  # 12 hours
 
-# Asset configurations
+# Asset configurations with multiple symbols for fallback
 ASSETS = {
     "GOLD": {
-        "symbol": "GC=F",
+        "symbols": ["GC=F", "GLD", "XAUUSD=X"],
         "display_name": "💰 GOLD",
         "risk_percent": 0.5,
         "profit_percent": 1.0,
@@ -38,7 +40,7 @@ ASSETS = {
         "mt5_units": 0.03
     },
     "SPY": {
-        "symbol": "SPY",
+        "symbols": ["SPY", "VOO", "IVV"],
         "display_name": "📈 SPY",
         "risk_percent": 2.0,
         "profit_percent": 4.0,
@@ -47,7 +49,7 @@ ASSETS = {
         "mt5_units": 0.03
     },
     "QQQ": {
-        "symbol": "QQQ",
+        "symbols": ["QQQ", "TQQQ"],
         "display_name": "🚀 QQQ",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -56,7 +58,7 @@ ASSETS = {
         "mt5_units": None
     },
     "ETH": {
-        "symbol": "ETH-USD",
+        "symbols": ["ETH-USD", "ETHUSD=X"],
         "display_name": "🔷 ETHEREUM",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -65,7 +67,7 @@ ASSETS = {
         "mt5_units": None
     },
     "ADA": {
-        "symbol": "ADA-USD",
+        "symbols": ["ADA-USD", "ADAUSD=X"],
         "display_name": "📊 CARDANO",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -106,20 +108,82 @@ def save_signal_time(asset, signal_type):
     tracker[key] = datetime.now(timezone.utc).timestamp()
     save_tracker(tracker)
 
-def fetch_data(symbol):
-    """Fetch 10-minute data from Yahoo Finance"""
+def fetch_yahoo_data(symbol):
+    """Fetch data from Yahoo Finance with proper session"""
     try:
-        log.info(f"Fetching {symbol}...")
-        ticker = yf.Ticker(symbol)
-        # Get 7 days of 10-minute data
+        # Create a session with proper headers
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        # Download with retry
+        ticker = yf.Ticker(symbol, session=session)
         df = ticker.history(period="7d", interval="10m")
+        
         if df is not None and not df.empty:
-            log.info(f"✅ Got {len(df)} bars for {symbol}")
+            log.info(f"✅ Yahoo: Got {len(df)} bars for {symbol}")
             return df
         return None
     except Exception as e:
-        log.error(f"Error fetching {symbol}: {e}")
+        log.debug(f"Yahoo error for {symbol}: {e}")
         return None
+
+def fetch_alpha_vantage_data(symbol, asset_type="stock"):
+    """Fetch data from Alpha Vantage as fallback"""
+    if not ALPHA_VANTAGE_KEY:
+        return None
+    
+    try:
+        if asset_type == "crypto":
+            url = f"https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_INTRADAY&symbol={symbol}&market=USD&interval=10min&apikey={ALPHA_VANTAGE_KEY}"
+        else:
+            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=10min&outputsize=full&apikey={ALPHA_VANTAGE_KEY}"
+        
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if 'Time Series' in data:
+            time_series = data['Time Series']
+            df = pd.DataFrame.from_dict(time_series, orient='index')
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+            df.columns = ['open', 'high', 'low', 'close', 'volume']
+            df = df.astype(float)
+            log.info(f"✅ Alpha Vantage: Got {len(df)} bars for {symbol}")
+            return df
+        elif 'Digital Currency Intraday' in data:
+            time_series = data['Digital Currency Intraday']
+            df = pd.DataFrame.from_dict(time_series, orient='index')
+            df.index = pd.to_datetime(df.index)
+            df = df.sort_index()
+            df['close'] = df['4a. close (USD)'].astype(float)
+            df['high'] = df['2a. high (USD)'].astype(float)
+            df['low'] = df['3a. low (USD)'].astype(float)
+            df['open'] = df['1a. open (USD)'].astype(float)
+            log.info(f"✅ Alpha Vantage: Got {len(df)} crypto bars for {symbol}")
+            return df
+        return None
+    except Exception as e:
+        log.debug(f"Alpha Vantage error: {e}")
+        return None
+
+def fetch_data(asset_name, config):
+    """Try multiple sources to get data"""
+    # Try Yahoo Finance with multiple symbols
+    for symbol in config['symbols']:
+        df = fetch_yahoo_data(symbol)
+        if df is not None and len(df) >= 100:
+            return df
+    
+    # Try Alpha Vantage as fallback
+    asset_type = "crypto" if asset_name in ['ETH', 'ADA'] else "stock"
+    for symbol in config['symbols']:
+        df = fetch_alpha_vantage_data(symbol, asset_type)
+        if df is not None and len(df) >= 100:
+            return df
+    
+    return None
 
 def calculate_ema(prices, period):
     """Calculate EMA"""
@@ -152,9 +216,9 @@ def calculate_ema_series(prices, period):
 def calculate_adx(df, period=14):
     """Calculate ADX indicator"""
     try:
-        high = df['High'].values
-        low = df['Low'].values
-        close = df['Close'].values
+        high = df['high'].values if 'high' in df.columns else df['High'].values
+        low = df['low'].values if 'low' in df.columns else df['Low'].values
+        close = df['close'].values if 'close' in df.columns else df['Close'].values
         
         if len(high) < period + 1:
             return 0
@@ -164,13 +228,11 @@ def calculate_adx(df, period=14):
         minus_dm = []
         
         for i in range(1, len(high)):
-            # True Range
             tr1 = high[i] - low[i]
             tr2 = abs(high[i] - close[i-1])
             tr3 = abs(low[i] - close[i-1])
             tr.append(max(tr1, tr2, tr3))
             
-            # Directional Movement
             up_move = high[i] - high[i-1]
             down_move = low[i-1] - low[i]
             
@@ -203,7 +265,8 @@ def check_ema_crossover(df):
     if df is None or len(df) < 200:
         return False, None
     
-    closes = df['Close'].values
+    close_col = 'close' if 'close' in df.columns else 'Close'
+    closes = df[close_col].values
     
     # Calculate EMAs
     ema50_series = calculate_ema_series(closes, 50)
@@ -273,10 +336,13 @@ def analyze_asset(asset_name, config):
     log.info(f"🔍 Analyzing {asset_name}...")
     
     # Fetch data
-    df = fetch_data(config['symbol'])
+    df = fetch_data(asset_name, config)
     if df is None or len(df) < 200:
         log.warning(f"⚠️ {asset_name}: Only {len(df) if df is not None else 0} bars")
         return None
+    
+    # Get close column name
+    close_col = 'close' if 'close' in df.columns else 'Close'
     
     # Check crossover
     has_cross, signal_type = check_ema_crossover(df)
@@ -284,8 +350,8 @@ def analyze_asset(asset_name, config):
         return None
     
     # Current values
-    current_price = df['Close'].iloc[-1]
-    closes = df['Close'].values
+    current_price = df[close_col].iloc[-1]
+    closes = df[close_col].values
     
     # Calculate EMAs for display
     ema50_series = calculate_ema_series(closes, 50)
@@ -422,7 +488,6 @@ def main():
             result = analyze_asset(asset_name, config)
             
             if result:
-                # Check cooldown
                 if check_signal_allowed(asset_name, result['signal_type']):
                     message = format_signal_message(asset_name, result)
                     if send_telegram_message(message):
@@ -432,11 +497,11 @@ def main():
                     else:
                         log.error(f"❌ Failed to send for {asset_name}")
                 else:
-                    log.info(f"⏭️ {asset_name} - in cooldown (12h)")
+                    log.info(f"⏭️ {asset_name} - in cooldown")
             else:
                 log.info(f"📊 {asset_name} - No crossover")
             
-            time.sleep(2)  # Rate limit
+            time.sleep(3)
             
         except Exception as e:
             log.error(f"❌ Error with {asset_name}: {e}")
