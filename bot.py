@@ -1,221 +1,194 @@
+"""
+QQQ/SPY/GOLD/ETH/ADA Trading Bot - EMA200/50 Crossover with ADX
+10-Minute Timeframe with Risk/Reward Calculations
+"""
+
 import os
 import logging
 import requests
-import json
-from datetime import datetime, timedelta
-import pytz
-from telegram import Bot
+from datetime import datetime, timezone
 import time
-import sys
-from typing import Dict, Optional, Tuple, List
+import numpy as np
+import yfinance as yf
+import json
 
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(__name__)
 
-# Configuration - Environment Variables
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CHAT_ID = os.environ.get('CHAT_ID')
-ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY')
+# ============ CONFIGURATION ============
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# Use persistent file for cooldown tracking
+COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
+SIGNAL_COOLDOWN = 43200  # 12 hours between same asset+signal
 
 # Asset configurations
 ASSETS = {
-    'GOLD': {
-        'symbol': 'XAUUSD',
-        'yahoo_symbol': 'GC=F',
-        'risk_percent': 0.5,
-        'profit_percent': 1.0,
-        'position_size': 10000,
-        'currency': 'EUR',
-        'mt5_units': 0.03,
-        'asset_type': 'commodity'
+    "GOLD": {
+        "symbol": "GC=F",
+        "display_name": "💰 GOLD",
+        "risk_percent": 0.5,
+        "profit_percent": 1.0,
+        "position_size": 10000,
+        "currency": "EUR",
+        "mt5_units": 0.03,
+        "asset_type": "commodity"
     },
-    'SPY': {
-        'symbol': 'SPY',
-        'yahoo_symbol': 'SPY',
-        'risk_percent': 2,
-        'profit_percent': 4,
-        'position_size': 2500,
-        'currency': 'EUR',
-        'mt5_units': 0.03,
-        'asset_type': 'etf'
+    "SPY": {
+        "symbol": "SPY",
+        "display_name": "📈 SPY",
+        "risk_percent": 2.0,
+        "profit_percent": 4.0,
+        "position_size": 2500,
+        "currency": "EUR",
+        "mt5_units": 0.03,
+        "asset_type": "etf"
     },
-    'QQQ': {
-        'symbol': 'QQQ',
-        'yahoo_symbol': 'QQQ',
-        'risk_percent': 1,
-        'profit_percent': 2,
-        'position_size': 2500,
-        'currency': 'EUR',
-        'mt5_units': None,
-        'asset_type': 'etf'
+    "QQQ": {
+        "symbol": "QQQ",
+        "display_name": "🚀 QQQ",
+        "risk_percent": 1.0,
+        "profit_percent": 2.0,
+        "position_size": 2500,
+        "currency": "EUR",
+        "mt5_units": None,
+        "asset_type": "etf"
     },
-    'ETH': {
-        'symbol': 'ETHUSD',
-        'yahoo_symbol': 'ETH-USD',
-        'risk_percent': 1,
-        'profit_percent': 2,
-        'position_size': 2500,
-        'currency': 'EUR',
-        'mt5_units': None,
-        'asset_type': 'crypto'
+    "ETH": {
+        "symbol": "ETH-USD",
+        "display_name": "🔷 ETHEREUM",
+        "risk_percent": 1.0,
+        "profit_percent": 2.0,
+        "position_size": 2500,
+        "currency": "EUR",
+        "mt5_units": None,
+        "asset_type": "crypto"
     },
-    'ADA': {
-        'symbol': 'ADAUSD',
-        'yahoo_symbol': 'ADA-USD',
-        'risk_percent': 1,
-        'profit_percent': 2,
-        'position_size': 2500,
-        'currency': 'EUR',
-        'mt5_units': None,
-        'asset_type': 'crypto'
+    "ADA": {
+        "symbol": "ADA-USD",
+        "display_name": "📊 CARDANO",
+        "risk_percent": 1.0,
+        "profit_percent": 2.0,
+        "position_size": 2500,
+        "currency": "EUR",
+        "mt5_units": None,
+        "asset_type": "crypto"
     }
 }
 
-class DataFetcher:
-    """Fetch data from Yahoo Finance (free, no API key needed)"""
+# ============ PERSISTENT TRACKING ============
+def load_tracker(file_path):
+    try:
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def save_tracker(file_path, data):
+    try:
+        with open(file_path, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.debug(f"Failed to save tracker: {e}")
+
+def check_signal_allowed(asset, signal_type):
+    tracker = load_tracker(COOLDOWN_FILE)
+    key = f"{asset}_{signal_type}"
+    now = datetime.now(timezone.utc).timestamp()
     
-    def __init__(self):
-        pass
-    
-    def fetch_from_yahoo(self, symbol: str) -> Optional[List[Dict]]:
-        """Fetch data from Yahoo Finance"""
-        try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            params = {
-                'interval': '10m',
-                'range': '7d',
-                'includePrePost': 'false'
-            }
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            logger.info(f"Fetching {symbol} from Yahoo...")
-            response = requests.get(url, params=params, headers=headers, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            
-            if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
-                result = data['chart']['result'][0]
-                timestamps = result.get('timestamp', [])
-                quote = result.get('indicators', {}).get('quote', [{}])[0]
-                
-                opens = quote.get('open', [])
-                highs = quote.get('high', [])
-                lows = quote.get('low', [])
-                closes = quote.get('close', [])
-                volumes = quote.get('volume', [])
-                
-                price_data = []
-                for i in range(len(timestamps)):
-                    if i < len(opens) and i < len(highs) and i < len(lows) and i < len(closes):
-                        if opens[i] and highs[i] and lows[i] and closes[i]:
-                            price_data.append({
-                                'timestamp': datetime.fromtimestamp(timestamps[i]).isoformat(),
-                                'open': float(opens[i]),
-                                'high': float(highs[i]),
-                                'low': float(lows[i]),
-                                'close': float(closes[i]),
-                                'volume': float(volumes[i]) if i < len(volumes) and volumes[i] else 0
-                            })
-                
-                if len(price_data) >= 100:
-                    logger.info(f"✅ Fetched {len(price_data)} bars for {symbol}")
-                    return price_data[-210:]  # Return last 210 bars
-                else:
-                    logger.warning(f"⚠️ Only {len(price_data)} bars for {symbol}")
-                    return None
-            else:
-                logger.warning(f"No data in response for {symbol}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error fetching {symbol}: {e}")
+    if key in tracker:
+        last_time = tracker[key]
+        if (now - last_time) < SIGNAL_COOLDOWN:
+            hours_left = (SIGNAL_COOLDOWN - (now - last_time)) / 3600
+            return False, f"cooldown ({hours_left:.1f} hours remaining)"
+    return True, "allowed"
+
+def save_signal_time(asset, signal_type):
+    tracker = load_tracker(COOLDOWN_FILE)
+    key = f"{asset}_{signal_type}"
+    tracker[key] = datetime.now(timezone.utc).timestamp()
+    save_tracker(COOLDOWN_FILE, tracker)
+
+# ============ DATA FETCHING ============
+def fetch_data(symbol, interval, period="7d"):
+    """Fetch data from Yahoo Finance"""
+    try:
+        log.info(f"Fetching {symbol} with interval {interval}...")
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval=interval)
+        if df is not None and not df.empty:
+            log.info(f"✅ Got {len(df)} bars for {symbol}")
+            return df
+        else:
+            log.warning(f"⚠️ No data for {symbol}")
             return None
-    
-    def fetch_intraday(self, asset_name: str, config: Dict) -> Optional[List[Dict]]:
-        """Fetch data for asset"""
-        yahoo_symbol = config.get('yahoo_symbol')
-        if yahoo_symbol:
-            data = self.fetch_from_yahoo(yahoo_symbol)
-            if data:
-                return data
-        
-        logger.error(f"❌ Could not fetch data for {asset_name}")
+    except Exception as e:
+        log.error(f"Error fetching {symbol}: {e}")
         return None
 
-class TechnicalAnalyzer:
-    """Technical calculations without pandas"""
-    
-    @staticmethod
-    def calculate_ema(prices: List[float], period: int) -> List[float]:
-        """Calculate EMA manually"""
-        if len(prices) < period:
-            return [0] * len(prices)
+# ============ TECHNICAL INDICATORS ============
+def calculate_ema(prices, period):
+    """Calculate EMA"""
+    if len(prices) < period:
+        return None
+    multiplier = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices[1:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
+def get_ema_series(prices, period):
+    """Get full EMA series"""
+    if len(prices) < period:
+        return []
+    ema_values = []
+    multiplier = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices:
+        ema = (price - ema) * multiplier + ema
+        ema_values.append(ema)
+    return ema_values
+
+def calculate_adx(df, period=14):
+    """Calculate ADX indicator"""
+    try:
+        high = df['High'].values
+        low = df['Low'].values
+        close = df['Close'].values
         
-        ema = []
-        multiplier = 2 / (period + 1)
-        
-        # Start with SMA for first value
-        sma = sum(prices[:period]) / period
-        ema.append(sma)
-        
-        # Calculate EMAs
-        for i in range(period, len(prices)):
-            current_ema = (prices[i] - ema[-1]) * multiplier + ema[-1]
-            ema.append(current_ema)
-        
-        # Pad beginning with zeros
-        padding = [0] * (period - 1)
-        return padding + ema
-    
-    @staticmethod
-    def calculate_true_range(high: float, low: float, prev_close: float) -> float:
-        """Calculate True Range"""
-        tr1 = high - low
-        tr2 = abs(high - prev_close)
-        tr3 = abs(low - prev_close)
-        return max(tr1, tr2, tr3)
-    
-    @staticmethod
-    def calculate_adx(prices: List[Dict], period: int = 14) -> float:
-        """Calculate ADX without pandas"""
-        if len(prices) < period * 2:
+        if len(high) < period + 1:
             return 0
         
-        tr_values = []
-        plus_dm_values = []
-        minus_dm_values = []
+        # Calculate True Range
+        tr = []
+        for i in range(1, len(high)):
+            tr1 = high[i] - low[i]
+            tr2 = abs(high[i] - close[i-1])
+            tr3 = abs(low[i] - close[i-1])
+            tr.append(max(tr1, tr2, tr3))
         
-        for i in range(1, len(prices)):
-            high = prices[i]['high']
-            low = prices[i]['low']
-            prev_close = prices[i-1]['close']
+        # Calculate Directional Movements
+        plus_dm = []
+        minus_dm = []
+        for i in range(1, len(high)):
+            up_move = high[i] - high[i-1]
+            down_move = low[i-1] - low[i]
             
-            tr = TechnicalAnalyzer.calculate_true_range(high, low, prev_close)
-            tr_values.append(tr)
+            if up_move > down_move and up_move > 0:
+                plus_dm.append(up_move)
+            else:
+                plus_dm.append(0)
             
-            up_move = high - prices[i-1]['high']
-            down_move = prices[i-1]['low'] - low
-            
-            plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
-            minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
-            
-            plus_dm_values.append(plus_dm)
-            minus_dm_values.append(minus_dm)
+            if down_move > up_move and down_move > 0:
+                minus_dm.append(down_move)
+            else:
+                minus_dm.append(0)
         
-        if len(tr_values) < period:
-            return 0
-        
-        # Simple averages
-        atr = sum(tr_values[:period]) / period
-        avg_plus_dm = sum(plus_dm_values[:period]) / period
-        avg_minus_dm = sum(minus_dm_values[:period]) / period
+        # Smooth with Wilder's method
+        atr = sum(tr[:period]) / period
+        avg_plus_dm = sum(plus_dm[:period]) / period
+        avg_minus_dm = sum(minus_dm[:period]) / period
         
         if atr == 0:
             return 0
@@ -228,176 +201,118 @@ class TechnicalAnalyzer:
         
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         return dx
-    
-    @staticmethod
-    def check_crossover(price_data: List[Dict]) -> Tuple[bool, Optional[str]]:
-        """Check for EMA200 crossing EMA50"""
-        if len(price_data) < 200:
-            return False, None
         
-        closes = [p['close'] for p in price_data]
-        
-        ema50 = TechnicalAnalyzer.calculate_ema(closes, 50)
-        ema200 = TechnicalAnalyzer.calculate_ema(closes, 200)
-        
-        if len(ema50) < 2 or len(ema200) < 2:
-            return False, None
-        
-        current_ema50 = ema50[-1]
-        current_ema200 = ema200[-1]
-        prev_ema50 = ema50[-2]
-        prev_ema200 = ema200[-2]
-        
-        # EMA200 crosses above EMA50 (Bullish)
-        if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
-            logger.info(f"📈 BULLISH - EMA200: {current_ema200:.2f} > EMA50: {current_ema50:.2f}")
-            return True, "BULLISH 🟢"
-        
-        # EMA200 crosses below EMA50 (Bearish)
-        elif prev_ema200 >= prev_ema50 and current_ema200 < current_ema50:
-            logger.info(f"📉 BEARISH - EMA200: {current_ema200:.2f} < EMA50: {current_ema50:.2f}")
-            return True, "BEARISH 🔴"
-        
+    except Exception as e:
+        log.error(f"ADX calculation error: {e}")
+        return 0
+
+def check_ema_crossover(df):
+    """Check for EMA200 crossing EMA50 on last two bars"""
+    if df is None or len(df) < 200:
         return False, None
+    
+    closes = df['Close'].values
+    
+    # Calculate EMAs
+    ema50_series = get_ema_series(closes, 50)
+    ema200_series = get_ema_series(closes, 200)
+    
+    if len(ema50_series) < 2 or len(ema200_series) < 2:
+        return False, None
+    
+    current_ema50 = ema50_series[-1]
+    current_ema200 = ema200_series[-1]
+    prev_ema50 = ema50_series[-2]
+    prev_ema200 = ema200_series[-2]
+    
+    # EMA200 crosses ABOVE EMA50 (Bullish)
+    if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
+        log.info(f"📈 BULLISH crossover detected! EMA200: {current_ema200:.2f} > EMA50: {current_ema50:.2f}")
+        return True, "BULLISH"
+    
+    # EMA200 crosses BELOW EMA50 (Bearish)
+    elif prev_ema200 >= prev_ema50 and current_ema200 < current_ema50:
+        log.info(f"📉 BEARISH crossover detected! EMA200: {current_ema200:.2f} < EMA50: {current_ema50:.2f}")
+        return True, "BEARISH"
+    
+    return False, None
 
-class SignalBot:
-    """Main bot class"""
+# ============ RISK REWARD CALCULATIONS ============
+def calculate_risk_reward(current_price, signal_type, risk_percent, profit_percent):
+    """Calculate entry, stop loss, and take profit levels"""
+    if signal_type == "BULLISH":
+        entry = current_price
+        stop_loss = entry * (1 - risk_percent / 100)
+        take_profit = entry * (1 + profit_percent / 100)
+    else:  # BEARISH
+        entry = current_price
+        stop_loss = entry * (1 + risk_percent / 100)
+        take_profit = entry * (1 - profit_percent / 100)
     
-    def __init__(self, telegram_token: str, chat_id: str):
-        self.fetcher = DataFetcher()
-        self.analyzer = TechnicalAnalyzer()
-        self.bot = Bot(token=telegram_token)
-        self.chat_id = chat_id
-        self.last_signals = {}
+    risk_amount = abs(entry - stop_loss)
+    reward_amount = abs(take_profit - entry)
+    ratio = round(reward_amount / risk_amount, 2) if risk_amount > 0 else 0
     
-    def calculate_risk_reward(self, current_price: float, signal_type: str, 
-                             risk_percent: float, profit_percent: float) -> Dict:
-        """Calculate risk/reward levels"""
-        if "BULLISH" in signal_type:
-            entry = current_price
-            stop_loss = entry * (1 - risk_percent / 100)
-            take_profit = entry * (1 + profit_percent / 100)
-        else:
-            entry = current_price
-            stop_loss = entry * (1 + risk_percent / 100)
-            take_profit = entry * (1 - profit_percent / 100)
-        
-        risk_amount = abs(entry - stop_loss)
-        reward_amount = abs(take_profit - entry)
-        actual_ratio = round(reward_amount / risk_amount, 2) if risk_amount > 0 else 0
-        
-        return {
-            'entry': round(entry, 4),
-            'stop_loss': round(stop_loss, 4),
-            'take_profit': round(take_profit, 4),
-            'risk_percent': risk_percent,
-            'profit_percent': profit_percent,
-            'actual_ratio': actual_ratio
-        }
-    
-    def analyze_asset(self, asset_name: str, config: Dict) -> Optional[Dict]:
-        """Analyze single asset"""
-        logger.info(f"🔍 Analyzing {asset_name}...")
-        
-        # Fetch data
-        price_data = self.fetcher.fetch_intraday(asset_name, config)
-        if not price_data or len(price_data) < 200:
-            logger.warning(f"❌ Insufficient data for {asset_name}")
-            return None
-        
-        # Check for crossover
-        has_crossover, signal_type = self.analyzer.check_crossover(price_data)
-        if not has_crossover:
-            return None
-        
-        # Get current values
-        current_price = price_data[-1]['close']
-        closes = [p['close'] for p in price_data]
-        
-        ema50_list = self.analyzer.calculate_ema(closes, 50)
-        ema200_list = self.analyzer.calculate_ema(closes, 200)
-        adx = self.analyzer.calculate_adx(price_data, 14)
-        
-        # ADX strength
-        if adx > 40:
-            adx_strength = "VERY STRONG 🔥"
-        elif adx > 25:
-            adx_strength = "STRONG ✅"
-        elif adx > 20:
-            adx_strength = "MODERATE 📊"
-        else:
-            adx_strength = "WEAK ⚠️"
-        
-        # Risk/Reward
-        rr = self.calculate_risk_reward(
-            current_price, signal_type,
-            config['risk_percent'], config['profit_percent']
-        )
-        
-        # Position sizing
-        shares = int(config['position_size'] / rr['entry']) if rr['entry'] > 0 else 0
-        position_value = shares * rr['entry']
-        total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
-        
-        return {
-            'asset': asset_name,
-            'signal_type': signal_type,
-            'current_price': round(current_price, 4),
-            'ema50': round(ema50_list[-1], 4) if ema50_list else 0,
-            'ema200': round(ema200_list[-1], 4) if ema200_list else 0,
-            'adx': round(adx, 2),
-            'adx_strength': adx_strength,
-            'risk_reward': rr,
-            'position_size': config['position_size'],
-            'currency': config['currency'],
-            'shares': shares,
-            'position_value': round(position_value, 2),
-            'total_risk': round(total_risk, 2),
-            'mt5_units': config.get('mt5_units'),
-            'timestamp': datetime.now(pytz.UTC)
-        }
-    
-    def format_message(self, signal: Dict) -> str:
-        """Format Telegram message"""
-        rr = signal['risk_reward']
-        
-        mt5_text = ""
-        if signal['mt5_units'] and signal['asset'] in ['GOLD', 'SPY']:
-            if signal['asset'] == 'GOLD':
-                risk_pips = abs(rr['entry'] - rr['stop_loss']) / 0.01
-                mt5_text = f"""
-💹 <b>MT5:</b>
-• Units: {signal['mt5_units']}
-• Risk: {risk_pips:.1f} pips
-• Approx Risk: ${risk_pips * signal['mt5_units'] * 10:.2f}
-"""
-            else:
-                risk_points = abs(rr['entry'] - rr['stop_loss'])
-                mt5_text = f"""
-💹 <b>MT5:</b>
-• Units: {signal['mt5_units']}
-• Risk: {risk_points:.2f} points
-"""
-        
-        message = f"""
-🚨 <b>{signal['asset']} TRADING SIGNAL - 10-MIN TIMEFRAME</b> 🚨
+    return {
+        'entry': round(entry, 4),
+        'stop_loss': round(stop_loss, 4),
+        'take_profit': round(take_profit, 4),
+        'risk_percent': risk_percent,
+        'profit_percent': profit_percent,
+        'ratio': ratio
+    }
 
-📊 <b>Signal:</b> {signal['signal_type']} (EMA200 crosses EMA50)
-💰 <b>Current Price:</b> ${signal['current_price']}
+def calculate_position_t212(position_size, entry_price, stop_loss, currency='EUR'):
+    """Calculate Trading 212 position sizing"""
+    risk_per_share = abs(entry_price - stop_loss)
+    shares = int(position_size / entry_price) if entry_price > 0 else 0
+    total_value = shares * entry_price
+    total_risk = shares * risk_per_share
+    
+    return {
+        'shares': shares,
+        'position_value': round(total_value, 2),
+        'total_risk': round(total_risk, 2),
+        'currency': currency
+    }
+
+# ============ TELEGRAM MESSAGE ============
+def send_signal(asset_name, asset_config, signal_type, current_price, ema50, ema200, adx, rr, position):
+    """Send formatted signal to Telegram"""
+    
+    direction = "🟢 BULLISH (LONG)" if signal_type == "BULLISH" else "🔴 BEARISH (SHORT)"
+    arrow = "📈" if signal_type == "BULLISH" else "📉"
+    
+    # ADX interpretation
+    if adx > 40:
+        adx_text = f"{adx:.1f} 🔥 VERY STRONG"
+    elif adx > 25:
+        adx_text = f"{adx:.1f} ✅ STRONG"
+    elif adx > 20:
+        adx_text = f"{adx:.1f} 📊 MODERATE"
+    else:
+        adx_text = f"{adx:.1f} ⚠️ WEAK"
+    
+    message = f"""<b>{arrow} {asset_config['display_name']} - {direction} SIGNAL {arrow}</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
-📈 <b>TECHNICAL INDICATORS</b>
+📊 <b>EMA CROSSOVER (10-Min)</b>
 ━━━━━━━━━━━━━━━━━━━━━
-• EMA50: ${signal['ema50']}
-• EMA200: ${signal['ema200']}
-• ADX: {signal['adx']} ({signal['adx_strength']})
+• EMA50: ${ema50:.2f}
+• EMA200: ${ema200:.2f}
+• <b>EMA200 crossed {signal_type.lower()} EMA50</b>
+
+━━━━━━━━━━━━━━━━━━━━━
+📈 <b>ADX TREND STRENGTH</b>
+━━━━━━━━━━━━━━━━━━━━━
+• ADX: {adx_text}
 
 ━━━━━━━━━━━━━━━━━━━━━
 ⚡ <b>RISK MANAGEMENT</b>
 ━━━━━━━━━━━━━━━━━━━━━
-• Stop Loss: {rr['risk_percent']}% from entry
-• Take Profit: {rr['profit_percent']}% from entry
-• Risk:Reward: 1:{rr['actual_ratio']}
+• Risk: {rr['risk_percent']}% per trade
+• Reward: {rr['profit_percent']}% target
+• Risk:Reward: 1:{rr['ratio']}
 
 📍 <b>Levels:</b>
 • Entry: ${rr['entry']}
@@ -405,85 +320,179 @@ class SignalBot:
 • Take Profit: ${rr['take_profit']}
 
 ━━━━━━━━━━━━━━━━━━━━━
-💼 <b>POSITION SIZING ({signal['currency']})</b>
+💼 <b>POSITION SIZING ({position['currency']})</b>
 ━━━━━━━━━━━━━━━━━━━━━
-
 📱 <b>Trading 212:</b>
-• Capital: {signal['position_size']:,}
-• Shares: {signal['shares']:,} units
-• Position Value: {signal['position_value']:,}
-• Total Risk: {signal['total_risk']:,}
-{mt5_text}
-━━━━━━━━━━━━━━━━━━━━━
-⏰ <i>{signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S UTC')}</i>
-
-⚠️ <b>DISCLAIMER:</b> For educational purposes only.
-Always do your own research before trading.
-
-<i>🤖 Multi-Asset Trading Bot | 10-Minute EMA Crossover Strategy</i>
+• Capital: {asset_config['position_size']:,}
+• Shares: {position['shares']:,} units
+• Position Value: {position['position_value']:,}
+• Total Risk: {position['total_risk']:,}
 """
-        return message
     
-    def send_signal(self, signal: Dict):
-        """Send signal to Telegram"""
-        try:
-            # Prevent duplicates
-            signal_key = f"{signal['asset']}_{signal['signal_type']}"
-            if signal_key in self.last_signals:
-                last_time = self.last_signals[signal_key]
-                time_diff = (datetime.now(pytz.UTC) - last_time).total_seconds() / 3600
-                if time_diff < 12:
-                    logger.info(f"⏭️ Skipping duplicate for {signal['asset']}")
-                    return
-            
-            message = self.format_message(signal)
-            self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            
-            self.last_signals[signal_key] = datetime.now(pytz.UTC)
-            logger.info(f"✅ Signal sent for {signal['asset']}")
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to send signal: {e}")
+    # Add MT5 info for Gold and SPY
+    if asset_config.get('mt5_units') and asset_name in ['GOLD', 'SPY']:
+        if asset_name == 'GOLD':
+            risk_pips = abs(rr['entry'] - rr['stop_loss']) / 0.01
+            message += f"""
+💹 <b>MT5:</b>
+• Units: {asset_config['mt5_units']}
+• Risk: {risk_pips:.1f} pips
+• Approx Risk: ${risk_pips * asset_config['mt5_units'] * 10:.2f}
+"""
+        else:
+            risk_points = abs(rr['entry'] - rr['stop_loss'])
+            message += f"""
+💹 <b>MT5:</b>
+• Units: {asset_config['mt5_units']}
+• Risk: {risk_points:.2f} points
+"""
     
-    def run(self):
-        """Run analysis"""
-        logger.info("=" * 70)
-        logger.info("🚀 Starting Multi-Asset Signal Analysis")
-        logger.info(f"📅 {datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        logger.info(f"📊 Assets: {', '.join(ASSETS.keys())}")
-        logger.info("=" * 70)
-        
-        signals_sent = 0
-        
-        for asset_name, config in ASSETS.items():
-            try:
-                time.sleep(1)
-                signal = self.analyze_asset(asset_name, config)
-                if signal:
-                    self.send_signal(signal)
-                    signals_sent += 1
-            except Exception as e:
-                logger.error(f"❌ Error with {asset_name}: {e}")
-        
-        logger.info("=" * 70)
-        logger.info(f"✅ Complete - {signals_sent} signal(s) sent")
-        logger.info("=" * 70)
+    message += f"""
+━━━━━━━━━━━━━━━━━━━━━
+💰 <b>Current Price:</b> ${current_price:.2f}
+⏰ <b>Signal Time:</b> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC
+
+⚠️ <i>Disclaimer: For educational purposes only.
+Always conduct your own research before trading.</i>
+"""
+    
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }, timeout=10)
+        r.raise_for_status()
+        log.info(f"✅ Signal sent for {asset_name}")
+        return True
+    except Exception as e:
+        log.error(f"Telegram failed: {e}")
+        return False
+
+# ============ MAIN ANALYSIS ============
+def analyze_asset(asset_name, asset_config):
+    """Analyze single asset for EMA crossover signals"""
+    log.info(f"\n{'='*50}")
+    log.info(f"🔍 Analyzing {asset_name} ({asset_config['symbol']})...")
+    log.info(f"{'='*50}")
+    
+    # Fetch 10-minute data
+    df = fetch_data(asset_config['symbol'], "10m", "7d")
+    if df is None or len(df) < 200:
+        log.warning(f"⚠️ {asset_name} - Insufficient data (need 200+ bars, got {len(df) if df is not None else 0})")
+        return None
+    
+    log.info(f"📊 Data points: {len(df)}")
+    
+    # Check for EMA crossover
+    has_crossover, signal_type = check_ema_crossover(df)
+    if not has_crossover:
+        log.info(f"📉 No EMA crossover detected for {asset_name}")
+        return None
+    
+    # Get current values
+    current_price = df['Close'].iloc[-1]
+    closes = df['Close'].values
+    
+    # Calculate current EMAs
+    ema50_series = get_ema_series(closes, 50)
+    ema200_series = get_ema_series(closes, 200)
+    
+    ema50 = ema50_series[-1] if ema50_series else 0
+    ema200 = ema200_series[-1] if ema200_series else 0
+    
+    # Calculate ADX
+    adx = calculate_adx(df, 14)
+    
+    # Calculate risk/reward
+    rr = calculate_risk_reward(
+        current_price,
+        signal_type,
+        asset_config['risk_percent'],
+        asset_config['profit_percent']
+    )
+    
+    # Calculate position sizing
+    position = calculate_position_t212(
+        asset_config['position_size'],
+        rr['entry'],
+        rr['stop_loss'],
+        asset_config['currency']
+    )
+    
+    log.info(f"✅ SIGNAL DETECTED!")
+    log.info(f"   Signal: {signal_type}")
+    log.info(f"   Price: ${current_price:.2f}")
+    log.info(f"   EMA50: ${ema50:.2f}")
+    log.info(f"   EMA200: ${ema200:.2f}")
+    log.info(f"   ADX: {adx:.1f}")
+    log.info(f"   Entry: ${rr['entry']}")
+    log.info(f"   Stop: ${rr['stop_loss']}")
+    log.info(f"   Target: ${rr['take_profit']}")
+    
+    return {
+        'signal_type': signal_type,
+        'current_price': current_price,
+        'ema50': ema50,
+        'ema200': ema200,
+        'adx': adx,
+        'rr': rr,
+        'position': position
+    }
 
 def main():
-    """Main entry point"""
-    logger.info("🤖 Multi-Asset Trading Bot Starting...")
+    log.info("=" * 70)
+    log.info("🚀 EMA CROSSOVER TRADING BOT - 10-MINUTE TIMEFRAME")
+    log.info("=" * 70)
+    log.info("Strategy: EMA200 crosses EMA50 on 10-minute chart")
+    log.info("Filters: ADX trend strength + Risk/Reward calculations")
+    log.info("=" * 70)
+    log.info(f"Monitoring {len(ASSETS)} assets:")
+    for name, config in ASSETS.items():
+        log.info(f"  • {name} ({config['symbol']}) - Risk: {config['risk_percent']}%, Reward: {config['profit_percent']}%")
+    log.info("=" * 70)
     
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.error("❌ Missing TELEGRAM_TOKEN or CHAT_ID environment variables")
-        sys.exit(1)
+    signals_sent = 0
     
-    bot = SignalBot(TELEGRAM_TOKEN, CHAT_ID)
-    bot.run()
+    for asset_name, asset_config in ASSETS.items():
+        try:
+            # Check if signal allowed (prevents duplicates)
+            result = analyze_asset(asset_name, asset_config)
+            
+            if result:
+                allowed, reason = check_signal_allowed(asset_name, result['signal_type'])
+                if allowed:
+                    log.info(f"\n🔔 SENDING {result['signal_type']} SIGNAL for {asset_name}!")
+                    success = send_signal(
+                        asset_name,
+                        asset_config,
+                        result['signal_type'],
+                        result['current_price'],
+                        result['ema50'],
+                        result['ema200'],
+                        result['adx'],
+                        result['rr'],
+                        result['position']
+                    )
+                    if success:
+                        save_signal_time(asset_name, result['signal_type'])
+                        signals_sent += 1
+                else:
+                    log.info(f"⏰ {asset_name} {result['signal_type']} - {reason}")
+            else:
+                log.info(f"📊 {asset_name} - No signal")
+            
+            # Small delay between assets
+            time.sleep(1)
+            
+        except Exception as e:
+            log.error(f"❌ Error processing {asset_name}: {e}")
+    
+    log.info(f"\n{'='*70}")
+    log.info(f"✅ Cycle complete. Sent {signals_sent} signal(s).")
+    log.info(f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    log.info(f"{'='*70}\n")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
