@@ -1,6 +1,6 @@
 """
 EMA Crossover Trading Bot - 15-Minute Timeframe
-Runs every 5 minutes - Twelve Data API (Free tier: 800 calls/day)
+Supports Multiple API Keys for different asset groups
 """
 
 import os
@@ -17,22 +17,29 @@ log = logging.getLogger(__name__)
 # ============ CONFIGURATION ============
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY")
+
+# Multiple API Keys for different asset groups
+TWELVE_DATA_KEY_MAIN = os.environ.get("TWELVE_DATA_API_KEY")  # For GOLD, SPY, QQQ
+TWELVE_DATA_KEY_CRYPTO = os.environ.get("TWELVE_DATA_API_KEY_2")  # For ETH, ADA
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     log.error("❌ Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
     exit(1)
 
-if not TWELVE_DATA_KEY:
-    log.error("❌ Missing TWELVE_DATA_API_KEY")
+if not TWELVE_DATA_KEY_MAIN:
+    log.error("❌ Missing TWELVE_DATA_API_KEY (for GOLD, SPY, QQQ)")
     log.error("Get one free at: https://twelvedata.com/apikey")
     exit(1)
 
+if not TWELVE_DATA_KEY_CRYPTO:
+    log.warning("⚠️ TWELVE_DATA_API_KEY_2 not set - Crypto assets (ETH, ADA) will be skipped")
+    log.warning("   Get a second free API key at: https://twelvedata.com/apikey")
+
 # Cooldown file
 COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
-SIGNAL_COOLDOWN = 43200  # 12 hours between same signals
+SIGNAL_COOLDOWN = 43200  # 12 hours
 
-# Asset configurations
+# Asset configurations with API key assignment
 ASSETS = {
     "GOLD": {
         "symbol": "XAU/USD",
@@ -41,7 +48,8 @@ ASSETS = {
         "profit_percent": 1.0,
         "position_size": 10000,
         "currency": "EUR",
-        "mt5_units": 0.03
+        "mt5_units": 0.03,
+        "api_key": TWELVE_DATA_KEY_MAIN
     },
     "SPY": {
         "symbol": "SPY",
@@ -50,7 +58,8 @@ ASSETS = {
         "profit_percent": 4.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": 0.03
+        "mt5_units": 0.03,
+        "api_key": TWELVE_DATA_KEY_MAIN
     },
     "QQQ": {
         "symbol": "QQQ",
@@ -59,7 +68,8 @@ ASSETS = {
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None
+        "mt5_units": None,
+        "api_key": TWELVE_DATA_KEY_MAIN
     },
     "ETH": {
         "symbol": "ETH/USD",
@@ -68,7 +78,8 @@ ASSETS = {
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None
+        "mt5_units": None,
+        "api_key": TWELVE_DATA_KEY_CRYPTO
     },
     "ADA": {
         "symbol": "ADA/USD",
@@ -77,7 +88,8 @@ ASSETS = {
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None
+        "mt5_units": None,
+        "api_key": TWELVE_DATA_KEY_CRYPTO
     }
 }
 
@@ -104,7 +116,7 @@ def check_signal_allowed(asset: str, signal_type: str) -> bool:
         last_time = tracker[key]
         if (now - last_time) < SIGNAL_COOLDOWN:
             hours_left = (SIGNAL_COOLDOWN - (now - last_time)) / 3600
-            log.info(f"⏭️ {asset} {signal_type} - cooldown ({hours_left:.1f}h left)")
+            log.info(f"⏭️ {asset} - cooldown ({hours_left:.1f}h left)")
             return False
     return True
 
@@ -114,15 +126,19 @@ def save_signal_time(asset: str, signal_type: str):
     tracker[key] = datetime.now(timezone.utc).timestamp()
     save_tracker(tracker)
 
-def fetch_twelvedata_data(symbol: str) -> Optional[List[Dict]]:
-    """Fetch 15-minute data from Twelve Data API"""
+def fetch_twelvedata_data(symbol: str, api_key: str) -> Optional[List[Dict]]:
+    """Fetch 15-minute data from Twelve Data API using specific key"""
+    if not api_key:
+        log.error(f"No API key available for {symbol}")
+        return None
+        
     try:
         url = f"https://api.twelvedata.com/time_series"
         params = {
             'symbol': symbol,
             'interval': '15min',
             'outputsize': '500',
-            'apikey': TWELVE_DATA_KEY
+            'apikey': api_key
         }
         
         log.info(f"Fetching {symbol} (15min)...")
@@ -294,8 +310,13 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     log.info(f"\n{'='*40}")
     log.info(f"🔍 Analyzing {asset_name}...")
     
+    # Check if API key is available
+    if not config['api_key']:
+        log.warning(f"⚠️ No API key for {asset_name} - skipping")
+        return None
+    
     # Fetch data
-    prices = fetch_twelvedata_data(config['symbol'])
+    prices = fetch_twelvedata_data(config['symbol'], config['api_key'])
     
     if not prices or len(prices) < 200:
         log.warning(f"⚠️ {asset_name}: Only {len(prices) if prices else 0} bars")
@@ -344,7 +365,6 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     log.info(f"✅ SIGNAL DETECTED: {signal_type} at ${current_price:.2f}")
     log.info(f"   EMA50: ${ema50:.2f}, EMA200: ${ema200:.2f}")
     log.info(f"   ADX: {adx:.1f}")
-    log.info(f"   Entry: ${rr['entry']}, Stop: ${rr['stop_loss']}, Target: ${rr['take_profit']}")
     
     return {
         'signal_type': signal_type,
@@ -432,44 +452,50 @@ def format_signal_message(data: Dict) -> str:
 """
     return message
 
-def test_api():
-    """Test the Twelve Data API connection"""
-    log.info("Testing Twelve Data API...")
-    test_symbol = "SPY"
-    result = fetch_twelvedata_data(test_symbol)
+def test_api(api_key: str, name: str) -> bool:
+    """Test a specific API key"""
+    log.info(f"Testing API key {name}...")
+    test_symbol = "SPY" if "MAIN" in name else "ETH/USD"
+    result = fetch_twelvedata_data(test_symbol, api_key)
     if result and len(result) > 0:
-        log.info(f"✅ API test successful!")
-        log.info(f"   Got {len(result)} bars for {test_symbol}")
-        log.info(f"   Latest price: ${result[-1]['close']:.2f}")
-        log.info(f"   Data range: {result[0]['timestamp']} to {result[-1]['timestamp']}")
+        log.info(f"✅ API {name} test successful!")
         return True
     else:
-        log.error("❌ API test failed. Check your TWELVE_DATA_API_KEY")
+        log.error(f"❌ API {name} test failed")
         return False
 
 def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER TRADING BOT - 15-MIN TIMEFRAME")
     log.info("=" * 70)
-    log.info(f"Twelve Data API Key: {TWELVE_DATA_KEY[:8]}...")
-    log.info(f"Schedule: Every 5 minutes")
-    log.info(f"Cooldown: 12 hours between same signals")
+    log.info("📊 Multi-API Configuration:")
+    log.info(f"   Main API Key (GOLD, SPY, QQQ): {TWELVE_DATA_KEY_MAIN[:8] if TWELVE_DATA_KEY_MAIN else 'NOT SET'}...")
+    log.info(f"   Crypto API Key (ETH, ADA): {TWELVE_DATA_KEY_CRYPTO[:8] if TWELVE_DATA_KEY_CRYPTO else 'NOT SET'}...")
     log.info("=" * 70)
     
-    # Test API first
-    if not test_api():
-        log.error("API test failed. Bot will exit.")
-        return
+    # Test APIs
+    if TWELVE_DATA_KEY_MAIN:
+        test_api(TWELVE_DATA_KEY_MAIN, "MAIN")
+    if TWELVE_DATA_KEY_CRYPTO:
+        test_api(TWELVE_DATA_KEY_CRYPTO, "CRYPTO")
     
     log.info("\n📊 Monitoring Assets:")
     for name, config in ASSETS.items():
-        log.info(f"  • {config['display_name']} - Risk: {config['risk_percent']}% / Target: {config['profit_percent']}%")
+        if config['api_key']:
+            log.info(f"  • {config['display_name']} - Risk: {config['risk_percent']}% / Target: {config['profit_percent']}%")
+        else:
+            log.info(f"  • {config['display_name']} - ⚠️ SKIPPED (no API key)")
     log.info("=" * 70)
     
     signals_sent = 0
     
     for asset_name, config in ASSETS.items():
         try:
+            # Skip if no API key
+            if not config['api_key']:
+                log.info(f"⏭️ {asset_name} - No API key, skipping")
+                continue
+                
             result = analyze_asset(asset_name, config)
             
             if result:
@@ -486,7 +512,7 @@ def main():
             else:
                 log.info(f"📊 {asset_name} - No crossover detected")
             
-            # Small delay between API calls to be safe
+            # Small delay between API calls
             time.sleep(2)
             
         except Exception as e:
