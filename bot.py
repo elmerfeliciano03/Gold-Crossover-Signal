@@ -1,7 +1,6 @@
 """
 EMA Crossover Trading Bot - 10-Minute Timeframe
-Using Only Alpha Vantage API (No pandas, No yfinance)
-Works on Python 3.14
+Using Twelve Data API (More reliable free tier)
 """
 
 import os
@@ -18,25 +17,26 @@ log = logging.getLogger(__name__)
 # ============ CONFIGURATION ============
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
+TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     log.error("❌ Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
     exit(1)
 
-if not ALPHA_VANTAGE_KEY:
-    log.error("❌ Missing ALPHA_VANTAGE_API_KEY")
-    log.error("Get one free at: https://www.alphavantage.co/support/#api-key")
+if not TWELVE_DATA_KEY:
+    log.error("❌ Missing TWELVE_DATA_API_KEY")
+    log.error("Get one free at: https://twelvedata.com/apikey")
     exit(1)
 
 # Cooldown file
 COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
 SIGNAL_COOLDOWN = 43200  # 12 hours
 
-# Asset configurations
+# Asset configurations with Twelve Data symbols
 ASSETS = {
     "GOLD": {
-        "symbol": "XAUUSD",
+        "symbol": "XAU/USD",
+        "twelve_symbol": "XAU/USD",
         "display_name": "💰 GOLD",
         "risk_percent": 0.5,
         "profit_percent": 1.0,
@@ -46,6 +46,7 @@ ASSETS = {
     },
     "SPY": {
         "symbol": "SPY",
+        "twelve_symbol": "SPY",
         "display_name": "📈 SPY",
         "risk_percent": 2.0,
         "profit_percent": 4.0,
@@ -55,6 +56,7 @@ ASSETS = {
     },
     "QQQ": {
         "symbol": "QQQ",
+        "twelve_symbol": "QQQ",
         "display_name": "🚀 QQQ",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -63,24 +65,24 @@ ASSETS = {
         "mt5_units": None
     },
     "ETH": {
-        "symbol": "ETH",
+        "symbol": "ETH/USD",
+        "twelve_symbol": "ETH/USD",
         "display_name": "🔷 ETHEREUM",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None,
-        "is_crypto": True
+        "mt5_units": None
     },
     "ADA": {
-        "symbol": "ADA",
+        "symbol": "ADA/USD",
+        "twelve_symbol": "ADA/USD",
         "display_name": "📊 CARDANO",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None,
-        "is_crypto": True
+        "mt5_units": None
     }
 }
 
@@ -117,83 +119,48 @@ def save_signal_time(asset: str, signal_type: str):
     tracker[key] = datetime.now(timezone.utc).timestamp()
     save_tracker(tracker)
 
-def fetch_stock_data(symbol: str) -> Optional[List[Dict]]:
-    """Fetch stock data from Alpha Vantage"""
+def fetch_twelvedata_data(symbol: str) -> Optional[List[Dict]]:
+    """Fetch data from Twelve Data API"""
     try:
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=10min&outputsize=full&apikey={ALPHA_VANTAGE_KEY}"
-        log.info(f"Fetching {symbol}...")
+        url = f"https://api.twelvedata.com/time_series"
+        params = {
+            'symbol': symbol,
+            'interval': '10min',
+            'outputsize': '500',
+            'apikey': TWELVE_DATA_KEY
+        }
         
-        response = requests.get(url, timeout=15)
+        log.info(f"Fetching {symbol} from Twelve Data...")
+        response = requests.get(url, params=params, timeout=15)
         data = response.json()
         
-        if 'Error Message' in data:
-            log.error(f"API Error: {data['Error Message']}")
+        if 'code' in data and data['code'] in (400, 401, 403, 429):
+            log.error(f"API Error: {data.get('message', 'Unknown error')}")
             return None
         
-        if 'Note' in data:
-            log.warning(f"Rate limit: {data['Note']}")
-            return None
-        
-        time_series_key = 'Time Series (10min)'
-        if time_series_key not in data:
-            log.error(f"No time series data for {symbol}")
+        if 'values' not in data:
+            log.error(f"No values in response for {symbol}")
             return None
         
         prices = []
-        for timestamp, values in sorted(data[time_series_key].items()):
+        for item in data['values']:
             prices.append({
-                'timestamp': timestamp,
-                'open': float(values['1. open']),
-                'high': float(values['2. high']),
-                'low': float(values['3. low']),
-                'close': float(values['4. close']),
-                'volume': float(values['5. volume'])
+                'timestamp': item['datetime'],
+                'open': float(item['open']),
+                'high': float(item['high']),
+                'low': float(item['low']),
+                'close': float(item['close']),
+                'volume': float(item.get('volume', 0))
             })
+        
+        # Reverse to chronological order (oldest first)
+        prices.reverse()
         
         log.info(f"✅ Got {len(prices)} bars for {symbol}")
         return prices
         
     except Exception as e:
         log.error(f"Error fetching {symbol}: {e}")
-        return None
-
-def fetch_crypto_data(symbol: str) -> Optional[List[Dict]]:
-    """Fetch crypto data from Alpha Vantage"""
-    try:
-        url = f"https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_INTRADAY&symbol={symbol}&market=USD&apikey={ALPHA_VANTAGE_KEY}"
-        log.info(f"Fetching crypto {symbol}...")
-        
-        response = requests.get(url, timeout=15)
-        data = response.json()
-        
-        if 'Error Message' in data:
-            log.error(f"API Error: {data['Error Message']}")
-            return None
-        
-        if 'Note' in data:
-            log.warning(f"Rate limit: {data['Note']}")
-            return None
-        
-        if 'Time Series Digital Currency Intraday' not in data:
-            log.error(f"No crypto data for {symbol}")
-            return None
-        
-        prices = []
-        for timestamp, values in sorted(data['Time Series Digital Currency Intraday'].items()):
-            prices.append({
-                'timestamp': timestamp,
-                'open': float(values['1a. open (USD)']),
-                'high': float(values['2a. high (USD)']),
-                'low': float(values['3a. low (USD)']),
-                'close': float(values['4a. close (USD)']),
-                'volume': float(values['5. volume'])
-            })
-        
-        log.info(f"✅ Got {len(prices)} crypto bars for {symbol}")
-        return prices
-        
-    except Exception as e:
-        log.error(f"Error fetching crypto {symbol}: {e}")
         return None
 
 def calculate_ema_series(prices: List[float], period: int) -> List[float]:
@@ -258,6 +225,7 @@ def calculate_adx(prices: List[Dict], period: int = 14) -> float:
 def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
     """Check if EMA200 crossed EMA50"""
     if len(prices) < 200:
+        log.warning(f"Need 200 bars, have {len(prices)}")
         return False, None
     
     closes = [p['close'] for p in prices]
@@ -272,6 +240,8 @@ def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
     current_ema200 = ema200[-1]
     prev_ema50 = ema50[-2]
     prev_ema200 = ema200[-2]
+    
+    log.info(f"EMA50: {current_ema50:.2f}, EMA200: {current_ema200:.2f}")
     
     # Bullish: EMA200 crosses above EMA50
     if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
@@ -327,11 +297,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     log.info(f"🔍 Analyzing {asset_name}...")
     
     # Fetch data
-    is_crypto = config.get('is_crypto', False)
-    if is_crypto:
-        prices = fetch_crypto_data(config['symbol'])
-    else:
-        prices = fetch_stock_data(config['symbol'])
+    prices = fetch_twelvedata_data(config['twelve_symbol'])
     
     if not prices or len(prices) < 200:
         log.warning(f"⚠️ {asset_name}: Only {len(prices) if prices else 0} bars")
@@ -340,6 +306,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     # Check crossover
     has_cross, signal_type = check_ema_crossover(prices)
     if not has_cross:
+        log.info(f"📊 {asset_name} - No crossover detected")
         return None
     
     # Current values
@@ -377,7 +344,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     position_value = shares * rr['entry']
     total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
     
-    log.info(f"✅ SIGNAL: {signal_type} at ${current_price:.2f}")
+    log.info(f"✅ SIGNAL DETECTED: {signal_type} at ${current_price:.2f}")
     log.info(f"   EMA50: ${ema50:.2f}, EMA200: ${ema200:.2f}")
     log.info(f"   ADX: {adx:.1f}")
     
@@ -467,11 +434,30 @@ def format_signal_message(data: Dict) -> str:
 """
     return message
 
+def test_api():
+    """Test the Twelve Data API connection"""
+    log.info("Testing Twelve Data API...")
+    test_symbol = "SPY"
+    result = fetch_twelvedata_data(test_symbol)
+    if result and len(result) > 0:
+        log.info(f"✅ API test successful! Got {len(result)} bars for {test_symbol}")
+        log.info(f"   Latest price: ${result[-1]['close']:.2f}")
+        return True
+    else:
+        log.error("❌ API test failed. Check your TWELVE_DATA_API_KEY")
+        return False
+
 def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER TRADING BOT - 10-MIN TIMEFRAME")
     log.info("=" * 70)
-    log.info(f"Alpha Vantage API Key: {ALPHA_VANTAGE_KEY[:8]}...")
+    log.info(f"Twelve Data API Key: {TWELVE_DATA_KEY[:8]}...")
+    
+    # Test API first
+    if not test_api():
+        log.error("API test failed. Bot will exit.")
+        return
+    
     log.info("Monitoring: GOLD, SPY, QQQ, ETH, ADA")
     log.info("=" * 70)
     
@@ -495,8 +481,8 @@ def main():
             else:
                 log.info(f"📊 {asset_name} - No crossover")
             
-            # Rate limiting: 5 calls per minute for free tier
-            time.sleep(12)
+            # Rate limiting: 8 requests per minute for free tier
+            time.sleep(8)
             
         except Exception as e:
             log.error(f"❌ Error with {asset_name}: {e}")
