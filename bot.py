@@ -1,6 +1,6 @@
 """
 EMA Crossover Trading Bot - 10-Minute Timeframe
-For Gold, SPY, QQQ, ETH, ADA
+Using Alpha Vantage API (works on Render)
 """
 
 import os
@@ -8,9 +8,7 @@ import logging
 import requests
 from datetime import datetime, timezone
 import time
-import yfinance as yf
 import json
-import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -18,20 +16,25 @@ log = logging.getLogger(__name__)
 # ============ CONFIGURATION ============
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")  # Optional backup
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     log.error("❌ Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
+    exit(1)
+
+if not ALPHA_VANTAGE_KEY:
+    log.error("❌ Missing ALPHA_VANTAGE_API_KEY - Get one free at https://www.alphavantage.co/support/#api-key")
     exit(1)
 
 # Cooldown file
 COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
 SIGNAL_COOLDOWN = 43200  # 12 hours
 
-# Asset configurations with multiple symbols for fallback
+# Asset configurations for Alpha Vantage
 ASSETS = {
     "GOLD": {
-        "symbols": ["GC=F", "GLD", "XAUUSD=X"],
+        "symbol": "XAUUSD",
+        "alpha_symbol": "XAUUSD",
         "display_name": "💰 GOLD",
         "risk_percent": 0.5,
         "profit_percent": 1.0,
@@ -40,7 +43,8 @@ ASSETS = {
         "mt5_units": 0.03
     },
     "SPY": {
-        "symbols": ["SPY", "VOO", "IVV"],
+        "symbol": "SPY",
+        "alpha_symbol": "SPY",
         "display_name": "📈 SPY",
         "risk_percent": 2.0,
         "profit_percent": 4.0,
@@ -49,16 +53,21 @@ ASSETS = {
         "mt5_units": 0.03
     },
     "QQQ": {
-        "symbols": ["QQQ", "TQQQ"],
+        "symbol": "QQQ",
+        "alpha_symbol": "QQQ",
         "display_name": "🚀 QQQ",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
         "mt5_units": None
-    },
+    }
+}
+
+# Crypto assets (different API endpoint)
+CRYPTO_ASSETS = {
     "ETH": {
-        "symbols": ["ETH-USD", "ETHUSD=X"],
+        "symbol": "ETH",
         "display_name": "🔷 ETHEREUM",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -67,7 +76,7 @@ ASSETS = {
         "mt5_units": None
     },
     "ADA": {
-        "symbols": ["ADA-USD", "ADAUSD=X"],
+        "symbol": "ADA",
         "display_name": "📊 CARDANO",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -99,6 +108,8 @@ def check_signal_allowed(asset, signal_type):
     if key in tracker:
         last_time = tracker[key]
         if (now - last_time) < SIGNAL_COOLDOWN:
+            hours_left = (SIGNAL_COOLDOWN - (now - last_time)) / 3600
+            log.info(f"⏭️ {asset} {signal_type} - cooldown ({hours_left:.1f}h left)")
             return False
     return True
 
@@ -108,98 +119,91 @@ def save_signal_time(asset, signal_type):
     tracker[key] = datetime.now(timezone.utc).timestamp()
     save_tracker(tracker)
 
-def fetch_yahoo_data(symbol):
-    """Fetch data from Yahoo Finance with proper session"""
+def fetch_stock_data(symbol):
+    """Fetch stock/ETF data from Alpha Vantage"""
     try:
-        # Create a session with proper headers
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=10min&outputsize=full&apikey={ALPHA_VANTAGE_KEY}"
+        log.info(f"Fetching {symbol} from Alpha Vantage...")
         
-        # Download with retry
-        ticker = yf.Ticker(symbol, session=session)
-        df = ticker.history(period="7d", interval="10m")
-        
-        if df is not None and not df.empty:
-            log.info(f"✅ Yahoo: Got {len(df)} bars for {symbol}")
-            return df
-        return None
-    except Exception as e:
-        log.debug(f"Yahoo error for {symbol}: {e}")
-        return None
-
-def fetch_alpha_vantage_data(symbol, asset_type="stock"):
-    """Fetch data from Alpha Vantage as fallback"""
-    if not ALPHA_VANTAGE_KEY:
-        return None
-    
-    try:
-        if asset_type == "crypto":
-            url = f"https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_INTRADAY&symbol={symbol}&market=USD&interval=10min&apikey={ALPHA_VANTAGE_KEY}"
-        else:
-            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=10min&outputsize=full&apikey={ALPHA_VANTAGE_KEY}"
-        
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=15)
         data = response.json()
         
-        if 'Time Series' in data:
-            time_series = data['Time Series']
-            df = pd.DataFrame.from_dict(time_series, orient='index')
-            df.index = pd.to_datetime(df.index)
-            df = df.sort_index()
-            df.columns = ['open', 'high', 'low', 'close', 'volume']
-            df = df.astype(float)
-            log.info(f"✅ Alpha Vantage: Got {len(df)} bars for {symbol}")
-            return df
-        elif 'Digital Currency Intraday' in data:
-            time_series = data['Digital Currency Intraday']
-            df = pd.DataFrame.from_dict(time_series, orient='index')
-            df.index = pd.to_datetime(df.index)
-            df = df.sort_index()
-            df['close'] = df['4a. close (USD)'].astype(float)
-            df['high'] = df['2a. high (USD)'].astype(float)
-            df['low'] = df['3a. low (USD)'].astype(float)
-            df['open'] = df['1a. open (USD)'].astype(float)
-            log.info(f"✅ Alpha Vantage: Got {len(df)} crypto bars for {symbol}")
-            return df
-        return None
+        if 'Error Message' in data:
+            log.error(f"Alpha Vantage error for {symbol}: {data['Error Message']}")
+            return None
+        
+        if 'Note' in data:
+            log.warning(f"API rate limit: {data['Note']}")
+            return None
+        
+        if 'Time Series (10min)' not in data:
+            log.error(f"No time series data for {symbol}")
+            return None
+        
+        time_series = data['Time Series (10min)']
+        
+        # Convert to list of dicts
+        prices = []
+        for timestamp, values in sorted(time_series.items()):
+            prices.append({
+                'timestamp': timestamp,
+                'open': float(values['1. open']),
+                'high': float(values['2. high']),
+                'low': float(values['3. low']),
+                'close': float(values['4. close']),
+                'volume': float(values['5. volume'])
+            })
+        
+        log.info(f"✅ Got {len(prices)} bars for {symbol}")
+        return prices
+        
     except Exception as e:
-        log.debug(f"Alpha Vantage error: {e}")
+        log.error(f"Error fetching {symbol}: {e}")
         return None
 
-def fetch_data(asset_name, config):
-    """Try multiple sources to get data"""
-    # Try Yahoo Finance with multiple symbols
-    for symbol in config['symbols']:
-        df = fetch_yahoo_data(symbol)
-        if df is not None and len(df) >= 100:
-            return df
-    
-    # Try Alpha Vantage as fallback
-    asset_type = "crypto" if asset_name in ['ETH', 'ADA'] else "stock"
-    for symbol in config['symbols']:
-        df = fetch_alpha_vantage_data(symbol, asset_type)
-        if df is not None and len(df) >= 100:
-            return df
-    
-    return None
-
-def calculate_ema(prices, period):
-    """Calculate EMA"""
-    if len(prices) < period:
+def fetch_crypto_data(symbol):
+    """Fetch crypto data from Alpha Vantage"""
+    try:
+        url = f"https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_INTRADAY&symbol={symbol}&market=USD&apikey={ALPHA_VANTAGE_KEY}"
+        log.info(f"Fetching crypto {symbol} from Alpha Vantage...")
+        
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        
+        if 'Error Message' in data:
+            log.error(f"Alpha Vantage error for {symbol}: {data['Error Message']}")
+            return None
+        
+        if 'Note' in data:
+            log.warning(f"API rate limit: {data['Note']}")
+            return None
+        
+        if 'Time Series Digital Currency Intraday' not in data:
+            log.error(f"No crypto data for {symbol}")
+            return None
+        
+        time_series = data['Time Series Digital Currency Intraday']
+        
+        prices = []
+        for timestamp, values in sorted(time_series.items()):
+            prices.append({
+                'timestamp': timestamp,
+                'open': float(values['1a. open (USD)']),
+                'high': float(values['2a. high (USD)']),
+                'low': float(values['3a. low (USD)']),
+                'close': float(values['4a. close (USD)']),
+                'volume': float(values['5. volume'])
+            })
+        
+        log.info(f"✅ Got {len(prices)} bars for {symbol}")
+        return prices
+        
+    except Exception as e:
+        log.error(f"Error fetching crypto {symbol}: {e}")
         return None
-    
-    multiplier = 2 / (period + 1)
-    ema = prices[0]
-    
-    for price in prices[1:]:
-        ema = (price - ema) * multiplier + ema
-    
-    return ema
 
 def calculate_ema_series(prices, period):
-    """Calculate full EMA series"""
+    """Calculate EMA series from price list"""
     if len(prices) < period:
         return []
     
@@ -213,81 +217,74 @@ def calculate_ema_series(prices, period):
     
     return ema_values
 
-def calculate_adx(df, period=14):
-    """Calculate ADX indicator"""
-    try:
-        high = df['high'].values if 'high' in df.columns else df['High'].values
-        low = df['low'].values if 'low' in df.columns else df['Low'].values
-        close = df['close'].values if 'close' in df.columns else df['Close'].values
-        
-        if len(high) < period + 1:
-            return 0
-        
-        tr = []
-        plus_dm = []
-        minus_dm = []
-        
-        for i in range(1, len(high)):
-            tr1 = high[i] - low[i]
-            tr2 = abs(high[i] - close[i-1])
-            tr3 = abs(low[i] - close[i-1])
-            tr.append(max(tr1, tr2, tr3))
-            
-            up_move = high[i] - high[i-1]
-            down_move = low[i-1] - low[i]
-            
-            plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
-            minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
-        
-        # Simple averages
-        atr = sum(tr[:period]) / period
-        avg_plus = sum(plus_dm[:period]) / period
-        avg_minus = sum(minus_dm[:period]) / period
-        
-        if atr == 0:
-            return 0
-        
-        plus_di = 100 * (avg_plus / atr)
-        minus_di = 100 * (avg_minus / atr)
-        
-        if plus_di + minus_di == 0:
-            return 0
-        
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        return dx
-        
-    except Exception as e:
-        log.debug(f"ADX error: {e}")
+def calculate_adx(prices, period=14):
+    """Calculate ADX from price data"""
+    if len(prices) < period * 2:
         return 0
+    
+    tr = []
+    plus_dm = []
+    minus_dm = []
+    
+    for i in range(1, len(prices)):
+        high = prices[i]['high']
+        low = prices[i]['low']
+        prev_close = prices[i-1]['close']
+        
+        # True Range
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low - prev_close)
+        tr.append(max(tr1, tr2, tr3))
+        
+        # Directional Movement
+        up_move = high - prices[i-1]['high']
+        down_move = prices[i-1]['low'] - low
+        
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
+    
+    # Simple averages
+    atr = sum(tr[:period]) / period
+    avg_plus = sum(plus_dm[:period]) / period
+    avg_minus = sum(minus_dm[:period]) / period
+    
+    if atr == 0:
+        return 0
+    
+    plus_di = 100 * (avg_plus / atr)
+    minus_di = 100 * (avg_minus / atr)
+    
+    if plus_di + minus_di == 0:
+        return 0
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    return dx
 
-def check_ema_crossover(df):
-    """Check if EMA200 crossed EMA50 in the last bar"""
-    if df is None or len(df) < 200:
+def check_ema_crossover(prices):
+    """Check if EMA200 crossed EMA50"""
+    if len(prices) < 200:
         return False, None
     
-    close_col = 'close' if 'close' in df.columns else 'Close'
-    closes = df[close_col].values
+    closes = [p['close'] for p in prices]
     
-    # Calculate EMAs
-    ema50_series = calculate_ema_series(closes, 50)
-    ema200_series = calculate_ema_series(closes, 200)
+    ema50 = calculate_ema_series(closes, 50)
+    ema200 = calculate_ema_series(closes, 200)
     
-    if len(ema50_series) < 2 or len(ema200_series) < 2:
+    if len(ema50) < 2 or len(ema200) < 2:
         return False, None
     
-    current_ema50 = ema50_series[-1]
-    current_ema200 = ema200_series[-1]
-    prev_ema50 = ema50_series[-2]
-    prev_ema200 = ema200_series[-2]
+    current_ema50 = ema50[-1]
+    current_ema200 = ema200[-1]
+    prev_ema50 = ema50[-2]
+    prev_ema200 = ema200[-2]
     
     # Bullish: EMA200 crosses above EMA50
     if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
-        log.info(f"📈 BULLISH crossover! EMA200: {current_ema200:.2f} > EMA50: {current_ema50:.2f}")
         return True, "BULLISH"
     
     # Bearish: EMA200 crosses below EMA50
     if prev_ema200 >= prev_ema50 and current_ema200 < current_ema50:
-        log.info(f"📉 BEARISH crossover! EMA200: {current_ema200:.2f} < EMA50: {current_ema50:.2f}")
         return True, "BEARISH"
     
     return False, None
@@ -330,30 +327,30 @@ def send_telegram_message(message):
         log.error(f"Telegram error: {e}")
         return False
 
-def analyze_asset(asset_name, config):
+def analyze_asset(asset_name, config, is_crypto=False):
     """Analyze single asset"""
     log.info(f"\n{'='*40}")
     log.info(f"🔍 Analyzing {asset_name}...")
     
     # Fetch data
-    df = fetch_data(asset_name, config)
-    if df is None or len(df) < 200:
-        log.warning(f"⚠️ {asset_name}: Only {len(df) if df is not None else 0} bars")
+    if is_crypto:
+        prices = fetch_crypto_data(config['symbol'])
+    else:
+        prices = fetch_stock_data(config['symbol'])
+    
+    if not prices or len(prices) < 200:
+        log.warning(f"⚠️ {asset_name}: Only {len(prices) if prices else 0} bars")
         return None
     
-    # Get close column name
-    close_col = 'close' if 'close' in df.columns else 'Close'
-    
     # Check crossover
-    has_cross, signal_type = check_ema_crossover(df)
+    has_cross, signal_type = check_ema_crossover(prices)
     if not has_cross:
         return None
     
     # Current values
-    current_price = df[close_col].iloc[-1]
-    closes = df[close_col].values
+    current_price = prices[-1]['close']
+    closes = [p['close'] for p in prices]
     
-    # Calculate EMAs for display
     ema50_series = calculate_ema_series(closes, 50)
     ema200_series = calculate_ema_series(closes, 200)
     
@@ -361,7 +358,7 @@ def analyze_asset(asset_name, config):
     ema200 = ema200_series[-1] if ema200_series else 0
     
     # Calculate ADX
-    adx = calculate_adx(df, 14)
+    adx = calculate_adx(prices, 14)
     
     # ADX interpretation
     if adx > 40:
@@ -380,14 +377,14 @@ def analyze_asset(asset_name, config):
         config['profit_percent']
     )
     
-    # Position sizing for Trading 212
+    # Position sizing
     shares = int(config['position_size'] / rr['entry']) if rr['entry'] > 0 else 0
     position_value = shares * rr['entry']
     total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
     
     log.info(f"✅ SIGNAL: {signal_type} at ${current_price:.2f}")
     log.info(f"   EMA50: ${ema50:.2f}, EMA200: ${ema200:.2f}")
-    log.info(f"   ADX: {adx:.1f}, Entry: ${rr['entry']}")
+    log.info(f"   ADX: {adx:.1f}")
     
     return {
         'signal_type': signal_type,
@@ -399,13 +396,15 @@ def analyze_asset(asset_name, config):
         'shares': shares,
         'position_value': position_value,
         'total_risk': total_risk,
-        'config': config
+        'config': config,
+        'asset_name': asset_name
     }
 
-def format_signal_message(asset_name, data):
-    """Format the signal message for Telegram"""
+def format_signal_message(data):
+    """Format signal for Telegram"""
     config = data['config']
     rr = data['rr']
+    asset_name = data['asset_name']
     
     arrow = "📈" if data['signal_type'] == "BULLISH" else "📉"
     direction = "🟢 BULLISH (LONG)" if data['signal_type'] == "BULLISH" else "🔴 BEARISH (SHORT)"
@@ -477,19 +476,20 @@ def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER TRADING BOT - 10-MIN TIMEFRAME")
     log.info("=" * 70)
+    log.info(f"Using Alpha Vantage API Key: {ALPHA_VANTAGE_KEY[:8]}...")
     log.info("Monitoring: Gold, SPY, QQQ, ETH, ADA")
-    log.info("Strategy: EMA200 crosses EMA50 on 10-min chart")
     log.info("=" * 70)
     
     signals_sent = 0
     
+    # Analyze stocks/ETFs
     for asset_name, config in ASSETS.items():
         try:
-            result = analyze_asset(asset_name, config)
+            result = analyze_asset(asset_name, config, is_crypto=False)
             
             if result:
                 if check_signal_allowed(asset_name, result['signal_type']):
-                    message = format_signal_message(asset_name, result)
+                    message = format_signal_message(result)
                     if send_telegram_message(message):
                         save_signal_time(asset_name, result['signal_type'])
                         signals_sent += 1
@@ -497,11 +497,35 @@ def main():
                     else:
                         log.error(f"❌ Failed to send for {asset_name}")
                 else:
-                    log.info(f"⏭️ {asset_name} - in cooldown")
+                    log.info(f"⏭️ {asset_name} - cooldown active")
             else:
                 log.info(f"📊 {asset_name} - No crossover")
             
-            time.sleep(3)
+            time.sleep(12)  # Alpha Vantage free tier: 5 calls per minute
+            
+        except Exception as e:
+            log.error(f"❌ Error with {asset_name}: {e}")
+    
+    # Analyze crypto
+    for asset_name, config in CRYPTO_ASSETS.items():
+        try:
+            result = analyze_asset(asset_name, config, is_crypto=True)
+            
+            if result:
+                if check_signal_allowed(asset_name, result['signal_type']):
+                    message = format_signal_message(result)
+                    if send_telegram_message(message):
+                        save_signal_time(asset_name, result['signal_type'])
+                        signals_sent += 1
+                        log.info(f"✅ Signal SENT for {asset_name}")
+                    else:
+                        log.error(f"❌ Failed to send for {asset_name}")
+                else:
+                    log.info(f"⏭️ {asset_name} - cooldown active")
+            else:
+                log.info(f"📊 {asset_name} - No crossover")
+            
+            time.sleep(12)  # Rate limiting
             
         except Exception as e:
             log.error(f"❌ Error with {asset_name}: {e}")
