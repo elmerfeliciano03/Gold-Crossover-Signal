@@ -82,83 +82,167 @@ ASSETS = {
 
 # Per-source rate limits (seconds between calls)
 RATE_LIMITS = {
-    'yahoo': 1.0,
-    'alphavantage': 12.0  # Free tier: 5 calls/min
+    'yahoo':        2.0,
+    'alphavantage': 12.0,   # Free tier: 5 calls/min
+    'coingecko':    6.0,    # Free tier: 10 calls/min
+}
+
+# CoinGecko coin IDs for crypto assets
+COINGECKO_IDS = {
+    'ETH': 'ethereum',
+    'ADA': 'cardano',
 }
 
 
 class DataFetcher:
-    """Fetch data from multiple sources with per-source rate limiting."""
+    """
+    Fetch OHLC data from multiple sources with per-source rate limiting.
+
+    Fallback chain per asset type:
+      Equities/ETFs/Commodities: Yahoo (crumb auth) → Alpha Vantage
+      Crypto:                    CoinGecko           → Yahoo → Alpha Vantage
+    """
+
+    # Realistic browser headers Yahoo now requires
+    _YAHOO_HEADERS = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/124.0.0.0 Safari/537.36'
+        ),
+        'Accept':          'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Origin':          'https://finance.yahoo.com',
+        'Referer':         'https://finance.yahoo.com/',
+    }
 
     def __init__(self, alpha_key: str = None):
-        self.alpha_key = alpha_key
+        self.alpha_key      = alpha_key
         self.alpha_base_url = "https://www.alphavantage.co/query"
         self._last_call: Dict[str, float] = {}
 
+        # Shared session so cookies persist across Yahoo calls (needed for crumb)
+        self._session = requests.Session()
+        self._session.headers.update(self._YAHOO_HEADERS)
+        self._yahoo_crumb: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
     def _rate_limit(self, source: str):
         """Block until the minimum inter-call gap for a source has elapsed."""
         min_gap = RATE_LIMITS.get(source, 1.0)
-        last = self._last_call.get(source, 0.0)
+        last    = self._last_call.get(source, 0.0)
         elapsed = time.monotonic() - last
         if elapsed < min_gap:
             time.sleep(min_gap - elapsed)
         self._last_call[source] = time.monotonic()
 
+    def _parse_yahoo_chart(self, data: dict, symbol: str) -> Optional[List[Dict]]:
+        """Parse a Yahoo Finance chart API response into a list of bar dicts."""
+        result = data.get('chart', {}).get('result', [None])[0]
+        if not result:
+            logger.warning(f"Yahoo: empty result for {symbol}")
+            return None
+
+        timestamps = result.get('timestamp', [])
+        quote      = result.get('indicators', {}).get('quote', [{}])[0]
+
+        opens   = quote.get('open',   [])
+        highs   = quote.get('high',   [])
+        lows    = quote.get('low',    [])
+        closes  = quote.get('close',  [])
+        volumes = quote.get('volume', [])
+
+        price_data = []
+        for i in range(len(timestamps)):
+            if None in (opens[i], highs[i], lows[i], closes[i]):
+                continue
+            price_data.append({
+                'timestamp': datetime.fromtimestamp(timestamps[i]).isoformat(),
+                'open':      float(opens[i]),
+                'high':      float(highs[i]),
+                'low':       float(lows[i]),
+                'close':     float(closes[i]),
+                'volume':    float(volumes[i]) if volumes[i] is not None else 0.0,
+            })
+
+        return price_data
+
+    # ------------------------------------------------------------------
+    # Yahoo Finance (crumb-authenticated)
+    # ------------------------------------------------------------------
+    def _get_yahoo_crumb(self) -> Optional[str]:
+        """
+        Obtain a crumb token from Yahoo Finance.
+        Yahoo now requires: visit the consent/main page first (sets cookies),
+        then call /v1/test/getcrumb to receive the crumb string.
+        """
+        if self._yahoo_crumb:
+            return self._yahoo_crumb
+        try:
+            # Step 1: hit the main page so Yahoo sets its session cookies
+            self._rate_limit('yahoo')
+            self._session.get('https://finance.yahoo.com', timeout=10)
+
+            # Step 2: fetch the crumb
+            self._rate_limit('yahoo')
+            resp = self._session.get(
+                'https://query1.finance.yahoo.com/v1/test/getcrumb',
+                timeout=10
+            )
+            if resp.status_code == 200 and resp.text:
+                self._yahoo_crumb = resp.text.strip()
+                logger.info(f"✅ Yahoo crumb obtained: {self._yahoo_crumb[:6]}...")
+                return self._yahoo_crumb
+
+            logger.warning(f"Yahoo crumb fetch returned {resp.status_code}")
+            return None
+
+        except Exception as e:
+            logger.warning(f"Yahoo crumb fetch failed: {e}")
+            return None
+
     def fetch_from_yahoo(self, symbol: str, retries: int = 3) -> Optional[List[Dict]]:
-        """Fetch 10-minute bars from Yahoo Finance."""
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        """Fetch 10-minute bars from Yahoo Finance using crumb authentication."""
+        crumb = self._get_yahoo_crumb()
+        if not crumb:
+            logger.warning("Yahoo: could not obtain crumb — skipping")
+            return None
+
+        url    = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         params = {
-            'interval': '10m',
-            'range': '7d',
-            'includePrePost': 'false'
-        }
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'interval':      '10m',
+            'range':         '7d',
+            'includePrePost':'false',
+            'crumb':         crumb,
         }
 
         for attempt in range(1, retries + 1):
             try:
                 self._rate_limit('yahoo')
-                response = requests.get(url, params=params, headers=headers, timeout=10)
+                response = self._session.get(url, params=params, timeout=10)
+
+                # If crumb expired, clear it and retry once with a fresh one
+                if response.status_code in (401, 403) and attempt == 1:
+                    logger.warning("Yahoo: crumb rejected — refreshing")
+                    self._yahoo_crumb = None
+                    crumb = self._get_yahoo_crumb()
+                    if crumb:
+                        params['crumb'] = crumb
+                    continue
+
                 response.raise_for_status()
-                data = response.json()
+                data       = response.json()
+                price_data = self._parse_yahoo_chart(data, symbol)
 
-                result = (
-                    data.get('chart', {})
-                        .get('result', [None])[0]
-                )
-                if not result:
-                    logger.warning(f"Yahoo: empty result for {symbol}")
-                    return None
-
-                timestamps = result.get('timestamp', [])
-                quote = result.get('indicators', {}).get('quote', [{}])[0]
-
-                opens   = quote.get('open',   [])
-                highs   = quote.get('high',   [])
-                lows    = quote.get('low',    [])
-                closes  = quote.get('close',  [])
-                volumes = quote.get('volume', [])
-
-                price_data = []
-                for i in range(len(timestamps)):
-                    # Skip bars with any None OHLC value
-                    if None in (opens[i], highs[i], lows[i], closes[i]):
-                        continue
-                    price_data.append({
-                        'timestamp': datetime.fromtimestamp(timestamps[i]).isoformat(),
-                        'open':   float(opens[i]),
-                        'high':   float(highs[i]),
-                        'low':    float(lows[i]),
-                        'close':  float(closes[i]),
-                        'volume': float(volumes[i]) if volumes[i] is not None else 0.0
-                    })
-
-                if len(price_data) >= 200:
+                if price_data and len(price_data) >= 200:
                     logger.info(f"✅ Yahoo: {len(price_data)} bars for {symbol}")
                     return price_data[-210:]
 
-                logger.warning(f"⚠️ Yahoo: only {len(price_data)} clean bars for {symbol}")
+                if price_data:
+                    logger.warning(f"⚠️ Yahoo: only {len(price_data)} clean bars for {symbol}")
                 return None
 
             except requests.RequestException as e:
@@ -169,28 +253,81 @@ class DataFetcher:
         logger.error(f"❌ Yahoo: all retries exhausted for {symbol}")
         return None
 
+    # ------------------------------------------------------------------
+    # CoinGecko (free, no API key, good for crypto OHLC)
+    # ------------------------------------------------------------------
+    def fetch_from_coingecko(self, coin_id: str, retries: int = 3) -> Optional[List[Dict]]:
+        """
+        Fetch ~10-minute OHLC bars from CoinGecko (free tier, no key needed).
+
+        CoinGecko's /coins/{id}/ohlc endpoint returns up to 7 days of data
+        at the finest granularity available (~30-min for free tier). We
+        interpolate nothing — just use what we get and check bar count.
+        """
+        url    = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+        params = {'vs_currency': 'usd', 'days': '7'}
+
+        for attempt in range(1, retries + 1):
+            try:
+                self._rate_limit('coingecko')
+                response = requests.get(url, params=params, timeout=10)
+                response.raise_for_status()
+                raw = response.json()  # [[timestamp_ms, o, h, l, c], ...]
+
+                price_data = [
+                    {
+                        'timestamp': datetime.fromtimestamp(row[0] / 1000).isoformat(),
+                        'open':      float(row[1]),
+                        'high':      float(row[2]),
+                        'low':       float(row[3]),
+                        'close':     float(row[4]),
+                        'volume':    0.0,  # OHLC endpoint doesn't include volume
+                    }
+                    for row in raw
+                    if len(row) == 5
+                ]
+
+                if len(price_data) >= 200:
+                    logger.info(f"✅ CoinGecko: {len(price_data)} bars for {coin_id}")
+                    return price_data[-210:]
+
+                logger.warning(f"⚠️ CoinGecko: only {len(price_data)} bars for {coin_id}")
+                return None
+
+            except requests.RequestException as e:
+                logger.warning(f"CoinGecko attempt {attempt}/{retries} for {coin_id}: {e}")
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+
+        logger.error(f"❌ CoinGecko: all retries exhausted for {coin_id}")
+        return None
+
+    # ------------------------------------------------------------------
+    # Alpha Vantage (fallback)
+    # ------------------------------------------------------------------
     def fetch_from_alphavantage(self, symbol: str, retries: int = 3) -> Optional[List[Dict]]:
         """Fetch 10-minute bars from Alpha Vantage."""
         if not self.alpha_key:
             return None
 
-        is_crypto = symbol in ['ETH', 'ADA']
+        is_crypto = symbol in COINGECKO_IDS
 
-        if is_crypto:
-            params = {
+        params = (
+            {
                 'function': 'DIGITAL_CURRENCY_INTRADAY',
-                'symbol': symbol,
-                'market': 'USD',
-                'apikey': self.alpha_key
+                'symbol':   symbol,
+                'market':   'USD',
+                'apikey':   self.alpha_key,
             }
-        else:
-            params = {
-                'function': 'TIME_SERIES_INTRADAY',
-                'symbol': symbol,
-                'interval': '10min',
+            if is_crypto else
+            {
+                'function':   'TIME_SERIES_INTRADAY',
+                'symbol':     symbol,
+                'interval':   '10min',
                 'outputsize': 'full',
-                'apikey': self.alpha_key
+                'apikey':     self.alpha_key,
             }
+        )
 
         for attempt in range(1, retries + 1):
             try:
@@ -215,11 +352,11 @@ class DataFetcher:
                     for ts, vals in sorted(data[ts_key].items()):
                         price_data.append({
                             'timestamp': ts,
-                            'open':   float(vals['1. open']),
-                            'high':   float(vals['2. high']),
-                            'low':    float(vals['3. low']),
-                            'close':  float(vals['4. close']),
-                            'volume': float(vals['5. volume'])
+                            'open':      float(vals['1. open']),
+                            'high':      float(vals['2. high']),
+                            'low':       float(vals['3. low']),
+                            'close':     float(vals['4. close']),
+                            'volume':    float(vals['5. volume']),
                         })
                 else:
                     ts_key = 'Digital Currency Intraday'
@@ -228,11 +365,11 @@ class DataFetcher:
                     for ts, vals in sorted(data[ts_key].items()):
                         price_data.append({
                             'timestamp': ts,
-                            'open':   float(vals['1a. open (USD)']),
-                            'high':   float(vals['2a. high (USD)']),
-                            'low':    float(vals['3a. low (USD)']),
-                            'close':  float(vals['4a. close (USD)']),
-                            'volume': float(vals['5. volume'])
+                            'open':      float(vals['1a. open (USD)']),
+                            'high':      float(vals['2a. high (USD)']),
+                            'low':       float(vals['3a. low (USD)']),
+                            'close':     float(vals['4a. close (USD)']),
+                            'volume':    float(vals['5. volume']),
                         })
 
                 if len(price_data) >= 200:
@@ -250,16 +387,34 @@ class DataFetcher:
         logger.error(f"❌ Alpha Vantage: all retries exhausted for {symbol}")
         return None
 
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
     def fetch_intraday(self, asset_name: str, config: Dict) -> Optional[List[Dict]]:
-        """Fetch from best available source with fallback."""
+        """
+        Fetch from the best available source for this asset type.
+
+        Crypto:  CoinGecko → Yahoo → Alpha Vantage
+        Others:  Yahoo     → Alpha Vantage
+        """
+        asset_type   = config.get('asset_type', '')
         yahoo_symbol = config.get('yahoo_symbol')
+        alpha_symbol = config.get('alpha_symbol')
+
+        if asset_type == 'crypto':
+            coin_id = COINGECKO_IDS.get(asset_name)
+            if coin_id:
+                logger.info(f"Trying CoinGecko for {asset_name}...")
+                data = self.fetch_from_coingecko(coin_id)
+                if data:
+                    return data
+
         if yahoo_symbol:
             logger.info(f"Trying Yahoo Finance for {asset_name}...")
             data = self.fetch_from_yahoo(yahoo_symbol)
             if data:
                 return data
 
-        alpha_symbol = config.get('alpha_symbol')
         if alpha_symbol:
             logger.info(f"Trying Alpha Vantage for {asset_name}...")
             data = self.fetch_from_alphavantage(alpha_symbol)
