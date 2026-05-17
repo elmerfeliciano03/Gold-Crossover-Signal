@@ -8,7 +8,6 @@ from telegram import Bot
 import time
 import sys
 from typing import Dict, Optional, Tuple, List
-from pathlib import Path
 
 # Enable logging
 logging.basicConfig(
@@ -27,7 +26,7 @@ ASSETS = {
     'GOLD': {
         'symbol': 'XAUUSD',
         'alpha_symbol': 'XAUUSD',
-        'timeframe': '10min',
+        'yahoo_symbol': 'GC=F',  # Gold futures on Yahoo
         'risk_percent': 0.5,
         'profit_percent': 1.0,
         'position_size': 10000,
@@ -38,7 +37,7 @@ ASSETS = {
     'SPY': {
         'symbol': 'SPY',
         'alpha_symbol': 'SPY',
-        'timeframe': '10min',
+        'yahoo_symbol': 'SPY',
         'risk_percent': 2,
         'profit_percent': 4,
         'position_size': 2500,
@@ -49,7 +48,7 @@ ASSETS = {
     'QQQ': {
         'symbol': 'QQQ',
         'alpha_symbol': 'QQQ',
-        'timeframe': '10min',
+        'yahoo_symbol': 'QQQ',
         'risk_percent': 1,
         'profit_percent': 2,
         'position_size': 2500,
@@ -60,7 +59,7 @@ ASSETS = {
     'ETH': {
         'symbol': 'ETHUSD',
         'alpha_symbol': 'ETH',
-        'timeframe': '10min',
+        'yahoo_symbol': 'ETH-USD',
         'risk_percent': 1,
         'profit_percent': 2,
         'position_size': 2500,
@@ -71,7 +70,7 @@ ASSETS = {
     'ADA': {
         'symbol': 'ADAUSD',
         'alpha_symbol': 'ADA',
-        'timeframe': '10min',
+        'yahoo_symbol': 'ADA-USD',
         'risk_percent': 1,
         'profit_percent': 2,
         'position_size': 2500,
@@ -80,6 +79,158 @@ ASSETS = {
         'asset_type': 'crypto'
     }
 }
+
+class DataFetcher:
+    """Fetch data from multiple sources"""
+    
+    def __init__(self, alpha_key: str = None):
+        self.alpha_key = alpha_key
+        self.alpha_base_url = "https://www.alphavantage.co/query"
+    
+    def fetch_from_yahoo(self, symbol: str) -> Optional[List[Dict]]:
+        """Fetch data from Yahoo Finance (free, no API key needed)"""
+        try:
+            # Use Yahoo Finance's public API
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+            params = {
+                'interval': '10m',
+                'range': '7d',
+                'includePrePost': 'false'
+            }
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'chart' in data and 'result' in data['chart'] and data['chart']['result']:
+                result = data['chart']['result'][0]
+                timestamps = result.get('timestamp', [])
+                quote = result.get('indicators', {}).get('quote', [{}])[0]
+                
+                opens = quote.get('open', [])
+                highs = quote.get('high', [])
+                lows = quote.get('low', [])
+                closes = quote.get('close', [])
+                volumes = quote.get('volume', [])
+                
+                price_data = []
+                for i in range(len(timestamps)):
+                    if all([opens[i], highs[i], lows[i], closes[i]]):
+                        price_data.append({
+                            'timestamp': datetime.fromtimestamp(timestamps[i]).isoformat(),
+                            'open': float(opens[i]),
+                            'high': float(highs[i]),
+                            'low': float(lows[i]),
+                            'close': float(closes[i]),
+                            'volume': float(volumes[i]) if volumes[i] else 0
+                        })
+                
+                if len(price_data) >= 200:
+                    logger.info(f"✅ Yahoo: Fetched {len(price_data)} bars for {symbol}")
+                    return price_data[-210:]
+                else:
+                    logger.warning(f"⚠️ Yahoo: Only {len(price_data)} bars for {symbol}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"Yahoo fetch error for {symbol}: {e}")
+            return None
+    
+    def fetch_from_alphavantage(self, symbol: str) -> Optional[List[Dict]]:
+        """Fetch data from Alpha Vantage (requires API key)"""
+        if not self.alpha_key:
+            return None
+            
+        try:
+            if symbol in ['ETH', 'ADA']:
+                params = {
+                    'function': 'DIGITAL_CURRENCY_INTRADAY',
+                    'symbol': symbol,
+                    'market': 'USD',
+                    'apikey': self.alpha_key
+                }
+            else:
+                params = {
+                    'function': 'TIME_SERIES_INTRADAY',
+                    'symbol': symbol,
+                    'interval': '10min',
+                    'outputsize': 'full',
+                    'apikey': self.alpha_key
+                }
+            
+            response = requests.get(self.alpha_base_url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if 'Error Message' in data or 'Note' in data:
+                logger.warning(f"Alpha Vantage limitation for {symbol}: {data.get('Note', data.get('Error Message', 'Unknown'))}")
+                return None
+            
+            price_data = []
+            
+            if 'Time Series' in data:
+                time_series_key = [k for k in data.keys() if 'Time Series' in k][0]
+                time_series = data[time_series_key]
+                
+                for timestamp, values in sorted(time_series.items(), reverse=False):
+                    price_data.append({
+                        'timestamp': timestamp,
+                        'open': float(values['1. open']),
+                        'high': float(values['2. high']),
+                        'low': float(values['3. low']),
+                        'close': float(values['4. close']),
+                        'volume': float(values['5. volume'])
+                    })
+                    
+            elif 'Digital Currency Intraday' in data:
+                time_series = data['Digital Currency Intraday']
+                
+                for timestamp, values in sorted(time_series.items(), reverse=False):
+                    price_data.append({
+                        'timestamp': timestamp,
+                        'open': float(values['1a. open (USD)']),
+                        'high': float(values['2a. high (USD)']),
+                        'low': float(values['3a. low (USD)']),
+                        'close': float(values['4a. close (USD)']),
+                        'volume': float(values['5. volume'])
+                    })
+            
+            if len(price_data) >= 200:
+                logger.info(f"✅ Alpha Vantage: Fetched {len(price_data)} bars for {symbol}")
+                return price_data[-210:]
+            else:
+                logger.warning(f"⚠️ Alpha Vantage: Only {len(price_data)} bars for {symbol}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Alpha Vantage error for {symbol}: {e}")
+            return None
+    
+    def fetch_intraday(self, asset_name: str, config: Dict) -> Optional[List[Dict]]:
+        """Fetch data from best available source"""
+        
+        # Try Yahoo Finance first (more reliable for free tier)
+        logger.info(f"Trying Yahoo Finance for {asset_name}...")
+        yahoo_symbol = config.get('yahoo_symbol')
+        if yahoo_symbol:
+            data = self.fetch_from_yahoo(yahoo_symbol)
+            if data:
+                return data
+        
+        # Try Alpha Vantage as backup
+        logger.info(f"Trying Alpha Vantage for {asset_name}...")
+        alpha_symbol = config.get('alpha_symbol')
+        if alpha_symbol:
+            data = self.fetch_from_alphavantage(alpha_symbol)
+            if data:
+                return data
+        
+        logger.error(f"❌ No data source available for {asset_name}")
+        return None
 
 class SimpleDataProcessor:
     """Technical calculations without pandas"""
@@ -161,101 +312,15 @@ class SimpleDataProcessor:
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         return dx
 
-class AlphaVantageFetcher:
-    """Fetch market data from Alpha Vantage"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = "https://www.alphavantage.co/query"
-    
-    def fetch_intraday(self, symbol: str, interval: str = '10min') -> Optional[List[Dict]]:
-        """Fetch intraday data"""
-        try:
-            # Handle crypto symbols differently
-            if symbol in ['ETH', 'ADA']:
-                params = {
-                    'function': 'DIGITAL_CURRENCY_INTRADAY',
-                    'symbol': symbol,
-                    'market': 'USD',
-                    'apikey': self.api_key
-                }
-            else:
-                params = {
-                    'function': 'TIME_SERIES_INTRADAY',
-                    'symbol': symbol,
-                    'interval': '10min',
-                    'outputsize': 'compact',
-                    'apikey': self.api_key
-                }
-            
-            logger.info(f"Fetching data for {symbol}...")
-            response = requests.get(self.base_url, params=params, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Check for API errors
-            if 'Error Message' in data:
-                logger.error(f"API Error for {symbol}: {data['Error Message']}")
-                return None
-            
-            if 'Note' in data:
-                logger.warning(f"API rate limit for {symbol}: {data['Note']}")
-                return None
-            
-            price_data = []
-            
-            # Parse time series data
-            if 'Time Series' in data:
-                time_series_key = [k for k in data.keys() if 'Time Series' in k][0]
-                time_series = data[time_series_key]
-                
-                # Sort by timestamp
-                for timestamp, values in sorted(time_series.items(), reverse=False):
-                    price_data.append({
-                        'timestamp': timestamp,
-                        'open': float(values['1. open']),
-                        'high': float(values['2. high']),
-                        'low': float(values['3. low']),
-                        'close': float(values['4. close']),
-                        'volume': float(values['5. volume'])
-                    })
-                    
-            elif 'Digital Currency Intraday' in data:
-                time_series = data['Digital Currency Intraday']
-                
-                for timestamp, values in sorted(time_series.items(), reverse=False):
-                    price_data.append({
-                        'timestamp': timestamp,
-                        'open': float(values['1a. open (USD)']),
-                        'high': float(values['2a. high (USD)']),
-                        'low': float(values['3a. low (USD)']),
-                        'close': float(values['4a. close (USD)']),
-                        'volume': float(values['5. volume'])
-                    })
-            
-            if len(price_data) >= 200:
-                logger.info(f"✅ Fetched {len(price_data)} bars for {symbol}")
-                return price_data[-210:]  # Return last 210 bars
-            else:
-                logger.warning(f"⚠️ Only {len(price_data)} bars for {symbol} (need 200+)")
-                return None
-                
-        except requests.exceptions.Timeout:
-            logger.error(f"Timeout fetching {symbol}")
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching {symbol}: {e}")
-            return None
-
 class SignalBot:
     """Main bot class"""
     
     def __init__(self, api_key: str, telegram_token: str, chat_id: str):
-        self.fetcher = AlphaVantageFetcher(api_key)
+        self.fetcher = DataFetcher(api_key)
         self.processor = SimpleDataProcessor()
         self.bot = Bot(token=telegram_token)
         self.chat_id = chat_id
-        self.last_signals = {}  # Prevent duplicate signals
+        self.last_signals = {}
     
     def check_crossover(self, price_data: List[Dict]) -> Tuple[bool, Optional[str]]:
         """Check for EMA200 crossing EMA50"""
@@ -281,14 +346,11 @@ class SignalBot:
         prev_ema200 = ema200[-2]
         
         # Check for crossover (EMA200 crossing EMA50)
-        # Bullish: EMA200 crosses ABOVE EMA50
         if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
-            logger.info(f"📈 BULLISH crossover detected! EMA200: {current_ema200:.2f} > EMA50: {current_ema50:.2f}")
+            logger.info(f"📈 BULLISH crossover! EMA200: {current_ema200:.2f} > EMA50: {current_ema50:.2f}")
             return True, "BULLISH 🟢"
-        
-        # Bearish: EMA200 crosses BELOW EMA50
         elif prev_ema200 >= prev_ema50 and current_ema200 < current_ema50:
-            logger.info(f"📉 BEARISH crossover detected! EMA200: {current_ema200:.2f} < EMA50: {current_ema50:.2f}")
+            logger.info(f"📉 BEARISH crossover! EMA200: {current_ema200:.2f} < EMA50: {current_ema50:.2f}")
             return True, "BEARISH 🔴"
         
         return False, None
@@ -300,7 +362,7 @@ class SignalBot:
             entry = current_price
             stop_loss = entry * (1 - risk_percent / 100)
             take_profit = entry * (1 + profit_percent / 100)
-        else:  # BEARISH
+        else:
             entry = current_price
             stop_loss = entry * (1 + risk_percent / 100)
             take_profit = entry * (1 - profit_percent / 100)
@@ -323,10 +385,16 @@ class SignalBot:
         logger.info(f"🔍 Analyzing {asset_name}...")
         
         # Fetch data
-        price_data = self.fetcher.fetch_intraday(config['alpha_symbol'], config['timeframe'])
-        if not price_data or len(price_data) < 200:
-            logger.warning(f"❌ Insufficient data for {asset_name}")
+        price_data = self.fetcher.fetch_intraday(asset_name, config)
+        if not price_data:
+            logger.warning(f"❌ No data for {asset_name}")
             return None
+        
+        if len(price_data) < 200:
+            logger.warning(f"⚠️ Only {len(price_data)} bars for {asset_name} (need 200+)")
+            return None
+        
+        logger.info(f"✅ Got {len(price_data)} bars for {asset_name}")
         
         # Check for crossover
         has_crossover, signal_type = self.check_crossover(price_data)
@@ -360,13 +428,12 @@ class SignalBot:
             config['risk_percent'], config['profit_percent']
         )
         
-        # Calculate position sizing for Trading 212
+        # Calculate position sizing
         shares = int(config['position_size'] / rr['entry']) if rr['entry'] > 0 else 0
         position_value = shares * rr['entry']
         total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
         
-        # Prepare signal data
-        signal_data = {
+        return {
             'asset': asset_name,
             'signal_type': signal_type,
             'current_price': round(current_price, 4),
@@ -383,28 +450,24 @@ class SignalBot:
             'mt5_units': config.get('mt5_units'),
             'timestamp': datetime.now(pytz.UTC)
         }
-        
-        logger.info(f"✅ Signal generated for {asset_name} - {signal_type}")
-        return signal_data
     
     def format_telegram_message(self, signal: Dict) -> str:
-        """Format signal as beautiful Telegram message"""
+        """Format signal as Telegram message"""
         rr = signal['risk_reward']
         
-        # Calculate risk in pips for MT5 if applicable
-        mt5_risk = ""
-        if signal['mt5_units']:
+        mt5_text = ""
+        if signal['mt5_units'] and signal['asset'] in ['GOLD', 'SPY']:
             if signal['asset'] == 'GOLD':
                 risk_pips = abs(rr['entry'] - rr['stop_loss']) / 0.01
-                mt5_risk = f"""
+                mt5_text = f"""
 💹 <b>MT5:</b>
 • Units: {signal['mt5_units']}
 • Risk: {risk_pips:.1f} pips
-• Total Risk: ~${risk_pips * signal['mt5_units'] * 10:.2f}
+• Approx Risk: ${risk_pips * signal['mt5_units'] * 10:.2f}
 """
-            elif signal['asset'] == 'SPY':
+            else:
                 risk_points = abs(rr['entry'] - rr['stop_loss'])
-                mt5_risk = f"""
+                mt5_text = f"""
 💹 <b>MT5:</b>
 • Units: {signal['mt5_units']}
 • Risk: {risk_points:.2f} points
@@ -428,7 +491,7 @@ class SignalBot:
 ━━━━━━━━━━━━━━━━━━━━━
 • Stop Loss: {rr['risk_percent']}% from entry
 • Take Profit: {rr['profit_percent']}% from entry
-• Risk:Reward Ratio: 1:{rr['actual_ratio']}
+• Risk:Reward: 1:{rr['actual_ratio']}
 
 📍 <b>Levels:</b>
 • Entry: ${rr['entry']}
@@ -444,12 +507,12 @@ class SignalBot:
 • Shares: {signal['shares']:,} units
 • Position Value: {signal['position_value']:,}
 • Total Risk: {signal['total_risk']:,}
-{mt5_risk}
+{mt5_text}
 ━━━━━━━━━━━━━━━━━━━━━
 ⏰ <i>{signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S UTC')}</i>
 
 ⚠️ <b>DISCLAIMER:</b> For educational purposes only.
-Always conduct your own research before trading.
+Always do your own research before trading.
 
 <i>🤖 Multi-Asset Trading Bot | 10-Minute EMA Crossover Strategy</i>
 """
@@ -458,18 +521,15 @@ Always conduct your own research before trading.
     def send_signal(self, signal: Dict):
         """Send signal to Telegram"""
         try:
-            # Check for duplicate signal (same asset & type within 12 hours)
-            asset = signal['asset']
-            signal_key = f"{asset}_{signal['signal_type']}"
-            
+            # Prevent duplicate signals
+            signal_key = f"{signal['asset']}_{signal['signal_type']}"
             if signal_key in self.last_signals:
                 last_time = self.last_signals[signal_key]
                 time_diff = (datetime.now(pytz.UTC) - last_time).total_seconds() / 3600
                 if time_diff < 12:
-                    logger.info(f"⏭️ Skipping duplicate signal for {asset} (sent {time_diff:.1f}h ago)")
+                    logger.info(f"⏭️ Skipping duplicate for {signal['asset']}")
                     return
             
-            # Format and send message
             message = self.format_telegram_message(signal)
             self.bot.send_message(
                 chat_id=self.chat_id,
@@ -478,66 +538,44 @@ Always conduct your own research before trading.
                 disable_web_page_preview=True
             )
             
-            # Record this signal
             self.last_signals[signal_key] = datetime.now(pytz.UTC)
-            logger.info(f"📨 Signal sent successfully for {asset}")
+            logger.info(f"✅ Signal sent for {signal['asset']}")
             
         except Exception as e:
             logger.error(f"❌ Failed to send signal: {e}")
     
     def run_analysis(self):
-        """Run complete analysis for all assets"""
+        """Run complete analysis"""
         logger.info("=" * 70)
         logger.info("🚀 Starting Multi-Asset Signal Analysis")
         logger.info(f"📅 {datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        logger.info(f"📊 Monitoring: {', '.join(ASSETS.keys())}")
+        logger.info(f"📊 Assets: {', '.join(ASSETS.keys())}")
         logger.info("=" * 70)
         
         signals_sent = 0
         
         for asset_name, config in ASSETS.items():
             try:
-                # Rate limiting between API calls
-                time.sleep(2)
-                
+                time.sleep(1)  # Rate limiting
                 signal = self.analyze_asset(asset_name, config)
                 if signal:
                     self.send_signal(signal)
                     signals_sent += 1
-                    
             except Exception as e:
-                logger.error(f"❌ Error analyzing {asset_name}: {e}")
+                logger.error(f"❌ Error with {asset_name}: {e}")
         
         logger.info("=" * 70)
-        if signals_sent > 0:
-            logger.info(f"✅ Analysis complete - {signals_sent} signal(s) sent")
-        else:
-            logger.info("📊 Analysis complete - No signals detected")
+        logger.info(f"✅ Analysis complete - {signals_sent} signal(s) sent")
         logger.info("=" * 70)
 
 def main():
     """Main entry point"""
     logger.info("🤖 Multi-Asset Trading Bot Initializing...")
     
-    # Validate environment variables
-    missing_vars = []
-    if not TELEGRAM_TOKEN:
-        missing_vars.append('TELEGRAM_TOKEN')
-    if not CHAT_ID:
-        missing_vars.append('CHAT_ID')
-    if not ALPHA_VANTAGE_API_KEY:
-        missing_vars.append('ALPHA_VANTAGE_API_KEY')
-    
-    if missing_vars:
-        logger.error(f"❌ Missing environment variables: {', '.join(missing_vars)}")
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        logger.error("❌ Missing TELEGRAM_TOKEN or CHAT_ID")
         sys.exit(1)
     
-    logger.info("✅ Environment variables validated")
-    logger.info(f"📱 Telegram Bot: {TELEGRAM_TOKEN[:15]}...")
-    logger.info(f"💬 Chat ID: {CHAT_ID}")
-    logger.info(f"🔑 Alpha Vantage API: {ALPHA_VANTAGE_API_KEY[:10]}...")
-    
-    # Run the bot
     bot = SignalBot(ALPHA_VANTAGE_API_KEY, TELEGRAM_TOKEN, CHAT_ID)
     bot.run_analysis()
 
