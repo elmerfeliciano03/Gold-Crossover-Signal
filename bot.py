@@ -1,6 +1,7 @@
 """
 EMA Crossover Trading Bot - 10-Minute Timeframe
-Using Alpha Vantage API (works on Render)
+Using Only Alpha Vantage API (No pandas, No yfinance)
+Works on Python 3.14
 """
 
 import os
@@ -9,6 +10,7 @@ import requests
 from datetime import datetime, timezone
 import time
 import json
+from typing import List, Dict, Optional, Tuple
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -23,18 +25,18 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     exit(1)
 
 if not ALPHA_VANTAGE_KEY:
-    log.error("❌ Missing ALPHA_VANTAGE_API_KEY - Get one free at https://www.alphavantage.co/support/#api-key")
+    log.error("❌ Missing ALPHA_VANTAGE_API_KEY")
+    log.error("Get one free at: https://www.alphavantage.co/support/#api-key")
     exit(1)
 
 # Cooldown file
 COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
 SIGNAL_COOLDOWN = 43200  # 12 hours
 
-# Asset configurations for Alpha Vantage
+# Asset configurations
 ASSETS = {
     "GOLD": {
         "symbol": "XAUUSD",
-        "alpha_symbol": "XAUUSD",
         "display_name": "💰 GOLD",
         "risk_percent": 0.5,
         "profit_percent": 1.0,
@@ -44,7 +46,6 @@ ASSETS = {
     },
     "SPY": {
         "symbol": "SPY",
-        "alpha_symbol": "SPY",
         "display_name": "📈 SPY",
         "risk_percent": 2.0,
         "profit_percent": 4.0,
@@ -54,18 +55,13 @@ ASSETS = {
     },
     "QQQ": {
         "symbol": "QQQ",
-        "alpha_symbol": "QQQ",
         "display_name": "🚀 QQQ",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
         "mt5_units": None
-    }
-}
-
-# Crypto assets (different API endpoint)
-CRYPTO_ASSETS = {
+    },
     "ETH": {
         "symbol": "ETH",
         "display_name": "🔷 ETHEREUM",
@@ -73,7 +69,8 @@ CRYPTO_ASSETS = {
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None
+        "mt5_units": None,
+        "is_crypto": True
     },
     "ADA": {
         "symbol": "ADA",
@@ -82,25 +79,26 @@ CRYPTO_ASSETS = {
         "profit_percent": 2.0,
         "position_size": 2500,
         "currency": "EUR",
-        "mt5_units": None
+        "mt5_units": None,
+        "is_crypto": True
     }
 }
 
-def load_tracker():
+def load_tracker() -> Dict:
     try:
         with open(COOLDOWN_FILE, 'r') as f:
             return json.load(f)
     except:
         return {}
 
-def save_tracker(data):
+def save_tracker(data: Dict):
     try:
         with open(COOLDOWN_FILE, 'w') as f:
             json.dump(data, f)
     except:
         pass
 
-def check_signal_allowed(asset, signal_type):
+def check_signal_allowed(asset: str, signal_type: str) -> bool:
     tracker = load_tracker()
     key = f"{asset}_{signal_type}"
     now = datetime.now(timezone.utc).timestamp()
@@ -109,42 +107,40 @@ def check_signal_allowed(asset, signal_type):
         last_time = tracker[key]
         if (now - last_time) < SIGNAL_COOLDOWN:
             hours_left = (SIGNAL_COOLDOWN - (now - last_time)) / 3600
-            log.info(f"⏭️ {asset} {signal_type} - cooldown ({hours_left:.1f}h left)")
+            log.info(f"⏭️ {asset} - cooldown ({hours_left:.1f}h left)")
             return False
     return True
 
-def save_signal_time(asset, signal_type):
+def save_signal_time(asset: str, signal_type: str):
     tracker = load_tracker()
     key = f"{asset}_{signal_type}"
     tracker[key] = datetime.now(timezone.utc).timestamp()
     save_tracker(tracker)
 
-def fetch_stock_data(symbol):
-    """Fetch stock/ETF data from Alpha Vantage"""
+def fetch_stock_data(symbol: str) -> Optional[List[Dict]]:
+    """Fetch stock data from Alpha Vantage"""
     try:
         url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=10min&outputsize=full&apikey={ALPHA_VANTAGE_KEY}"
-        log.info(f"Fetching {symbol} from Alpha Vantage...")
+        log.info(f"Fetching {symbol}...")
         
         response = requests.get(url, timeout=15)
         data = response.json()
         
         if 'Error Message' in data:
-            log.error(f"Alpha Vantage error for {symbol}: {data['Error Message']}")
+            log.error(f"API Error: {data['Error Message']}")
             return None
         
         if 'Note' in data:
-            log.warning(f"API rate limit: {data['Note']}")
+            log.warning(f"Rate limit: {data['Note']}")
             return None
         
-        if 'Time Series (10min)' not in data:
+        time_series_key = 'Time Series (10min)'
+        if time_series_key not in data:
             log.error(f"No time series data for {symbol}")
             return None
         
-        time_series = data['Time Series (10min)']
-        
-        # Convert to list of dicts
         prices = []
-        for timestamp, values in sorted(time_series.items()):
+        for timestamp, values in sorted(data[time_series_key].items()):
             prices.append({
                 'timestamp': timestamp,
                 'open': float(values['1. open']),
@@ -161,31 +157,29 @@ def fetch_stock_data(symbol):
         log.error(f"Error fetching {symbol}: {e}")
         return None
 
-def fetch_crypto_data(symbol):
+def fetch_crypto_data(symbol: str) -> Optional[List[Dict]]:
     """Fetch crypto data from Alpha Vantage"""
     try:
         url = f"https://www.alphavantage.co/query?function=DIGITAL_CURRENCY_INTRADAY&symbol={symbol}&market=USD&apikey={ALPHA_VANTAGE_KEY}"
-        log.info(f"Fetching crypto {symbol} from Alpha Vantage...")
+        log.info(f"Fetching crypto {symbol}...")
         
         response = requests.get(url, timeout=15)
         data = response.json()
         
         if 'Error Message' in data:
-            log.error(f"Alpha Vantage error for {symbol}: {data['Error Message']}")
+            log.error(f"API Error: {data['Error Message']}")
             return None
         
         if 'Note' in data:
-            log.warning(f"API rate limit: {data['Note']}")
+            log.warning(f"Rate limit: {data['Note']}")
             return None
         
         if 'Time Series Digital Currency Intraday' not in data:
             log.error(f"No crypto data for {symbol}")
             return None
         
-        time_series = data['Time Series Digital Currency Intraday']
-        
         prices = []
-        for timestamp, values in sorted(time_series.items()):
+        for timestamp, values in sorted(data['Time Series Digital Currency Intraday'].items()):
             prices.append({
                 'timestamp': timestamp,
                 'open': float(values['1a. open (USD)']),
@@ -195,15 +189,15 @@ def fetch_crypto_data(symbol):
                 'volume': float(values['5. volume'])
             })
         
-        log.info(f"✅ Got {len(prices)} bars for {symbol}")
+        log.info(f"✅ Got {len(prices)} crypto bars for {symbol}")
         return prices
         
     except Exception as e:
         log.error(f"Error fetching crypto {symbol}: {e}")
         return None
 
-def calculate_ema_series(prices, period):
-    """Calculate EMA series from price list"""
+def calculate_ema_series(prices: List[float], period: int) -> List[float]:
+    """Calculate EMA series"""
     if len(prices) < period:
         return []
     
@@ -217,7 +211,7 @@ def calculate_ema_series(prices, period):
     
     return ema_values
 
-def calculate_adx(prices, period=14):
+def calculate_adx(prices: List[Dict], period: int = 14) -> float:
     """Calculate ADX from price data"""
     if len(prices) < period * 2:
         return 0
@@ -244,7 +238,7 @@ def calculate_adx(prices, period=14):
         plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
         minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
     
-    # Simple averages
+    # Averages
     atr = sum(tr[:period]) / period
     avg_plus = sum(plus_dm[:period]) / period
     avg_minus = sum(minus_dm[:period]) / period
@@ -261,7 +255,7 @@ def calculate_adx(prices, period=14):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     return dx
 
-def check_ema_crossover(prices):
+def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
     """Check if EMA200 crossed EMA50"""
     if len(prices) < 200:
         return False, None
@@ -289,7 +283,7 @@ def check_ema_crossover(prices):
     
     return False, None
 
-def calculate_risk_reward(price, signal_type, risk_pct, profit_pct):
+def calculate_risk_reward(price: float, signal_type: str, risk_pct: float, profit_pct: float) -> Dict:
     """Calculate entry, stop loss, take profit"""
     if signal_type == "BULLISH":
         entry = price
@@ -313,7 +307,7 @@ def calculate_risk_reward(price, signal_type, risk_pct, profit_pct):
         'ratio': ratio
     }
 
-def send_telegram_message(message):
+def send_telegram_message(message: str) -> bool:
     """Send message to Telegram"""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -327,12 +321,13 @@ def send_telegram_message(message):
         log.error(f"Telegram error: {e}")
         return False
 
-def analyze_asset(asset_name, config, is_crypto=False):
+def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     """Analyze single asset"""
     log.info(f"\n{'='*40}")
     log.info(f"🔍 Analyzing {asset_name}...")
     
     # Fetch data
+    is_crypto = config.get('is_crypto', False)
     if is_crypto:
         prices = fetch_crypto_data(config['symbol'])
     else:
@@ -400,7 +395,7 @@ def analyze_asset(asset_name, config, is_crypto=False):
         'asset_name': asset_name
     }
 
-def format_signal_message(data):
+def format_signal_message(data: Dict) -> str:
     """Format signal for Telegram"""
     config = data['config']
     rr = data['rr']
@@ -476,16 +471,15 @@ def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER TRADING BOT - 10-MIN TIMEFRAME")
     log.info("=" * 70)
-    log.info(f"Using Alpha Vantage API Key: {ALPHA_VANTAGE_KEY[:8]}...")
-    log.info("Monitoring: Gold, SPY, QQQ, ETH, ADA")
+    log.info(f"Alpha Vantage API Key: {ALPHA_VANTAGE_KEY[:8]}...")
+    log.info("Monitoring: GOLD, SPY, QQQ, ETH, ADA")
     log.info("=" * 70)
     
     signals_sent = 0
     
-    # Analyze stocks/ETFs
     for asset_name, config in ASSETS.items():
         try:
-            result = analyze_asset(asset_name, config, is_crypto=False)
+            result = analyze_asset(asset_name, config)
             
             if result:
                 if check_signal_allowed(asset_name, result['signal_type']):
@@ -501,31 +495,8 @@ def main():
             else:
                 log.info(f"📊 {asset_name} - No crossover")
             
-            time.sleep(12)  # Alpha Vantage free tier: 5 calls per minute
-            
-        except Exception as e:
-            log.error(f"❌ Error with {asset_name}: {e}")
-    
-    # Analyze crypto
-    for asset_name, config in CRYPTO_ASSETS.items():
-        try:
-            result = analyze_asset(asset_name, config, is_crypto=True)
-            
-            if result:
-                if check_signal_allowed(asset_name, result['signal_type']):
-                    message = format_signal_message(result)
-                    if send_telegram_message(message):
-                        save_signal_time(asset_name, result['signal_type'])
-                        signals_sent += 1
-                        log.info(f"✅ Signal SENT for {asset_name}")
-                    else:
-                        log.error(f"❌ Failed to send for {asset_name}")
-                else:
-                    log.info(f"⏭️ {asset_name} - cooldown active")
-            else:
-                log.info(f"📊 {asset_name} - No crossover")
-            
-            time.sleep(12)  # Rate limiting
+            # Rate limiting: 5 calls per minute for free tier
+            time.sleep(12)
             
         except Exception as e:
             log.error(f"❌ Error with {asset_name}: {e}")
