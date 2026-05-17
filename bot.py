@@ -1,6 +1,6 @@
 """
-EMA Crossover Trading Bot - 10-Minute Timeframe
-Using Twelve Data API (More reliable free tier)
+EMA Crossover Trading Bot - 15-Minute Timeframe
+Runs every 5 minutes - Twelve Data API (Free tier: 800 calls/day)
 """
 
 import os
@@ -30,13 +30,12 @@ if not TWELVE_DATA_KEY:
 
 # Cooldown file
 COOLDOWN_FILE = "/tmp/ema_signal_tracker.json"
-SIGNAL_COOLDOWN = 43200  # 12 hours
+SIGNAL_COOLDOWN = 43200  # 12 hours between same signals
 
-# Asset configurations with Twelve Data symbols
+# Asset configurations
 ASSETS = {
     "GOLD": {
         "symbol": "XAU/USD",
-        "twelve_symbol": "XAU/USD",
         "display_name": "💰 GOLD",
         "risk_percent": 0.5,
         "profit_percent": 1.0,
@@ -46,7 +45,6 @@ ASSETS = {
     },
     "SPY": {
         "symbol": "SPY",
-        "twelve_symbol": "SPY",
         "display_name": "📈 SPY",
         "risk_percent": 2.0,
         "profit_percent": 4.0,
@@ -56,7 +54,6 @@ ASSETS = {
     },
     "QQQ": {
         "symbol": "QQQ",
-        "twelve_symbol": "QQQ",
         "display_name": "🚀 QQQ",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -66,7 +63,6 @@ ASSETS = {
     },
     "ETH": {
         "symbol": "ETH/USD",
-        "twelve_symbol": "ETH/USD",
         "display_name": "🔷 ETHEREUM",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -76,7 +72,6 @@ ASSETS = {
     },
     "ADA": {
         "symbol": "ADA/USD",
-        "twelve_symbol": "ADA/USD",
         "display_name": "📊 CARDANO",
         "risk_percent": 1.0,
         "profit_percent": 2.0,
@@ -109,7 +104,7 @@ def check_signal_allowed(asset: str, signal_type: str) -> bool:
         last_time = tracker[key]
         if (now - last_time) < SIGNAL_COOLDOWN:
             hours_left = (SIGNAL_COOLDOWN - (now - last_time)) / 3600
-            log.info(f"⏭️ {asset} - cooldown ({hours_left:.1f}h left)")
+            log.info(f"⏭️ {asset} {signal_type} - cooldown ({hours_left:.1f}h left)")
             return False
     return True
 
@@ -120,22 +115,22 @@ def save_signal_time(asset: str, signal_type: str):
     save_tracker(tracker)
 
 def fetch_twelvedata_data(symbol: str) -> Optional[List[Dict]]:
-    """Fetch data from Twelve Data API"""
+    """Fetch 15-minute data from Twelve Data API"""
     try:
         url = f"https://api.twelvedata.com/time_series"
         params = {
             'symbol': symbol,
-            'interval': '10min',
+            'interval': '15min',
             'outputsize': '500',
             'apikey': TWELVE_DATA_KEY
         }
         
-        log.info(f"Fetching {symbol} from Twelve Data...")
+        log.info(f"Fetching {symbol} (15min)...")
         response = requests.get(url, params=params, timeout=15)
         data = response.json()
         
-        if 'code' in data and data['code'] in (400, 401, 403, 429):
-            log.error(f"API Error: {data.get('message', 'Unknown error')}")
+        if 'code' in data:
+            log.error(f"API Error {data['code']}: {data.get('message', 'Unknown error')}")
             return None
         
         if 'values' not in data:
@@ -241,8 +236,6 @@ def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
     prev_ema50 = ema50[-2]
     prev_ema200 = ema200[-2]
     
-    log.info(f"EMA50: {current_ema50:.2f}, EMA200: {current_ema200:.2f}")
-    
     # Bullish: EMA200 crosses above EMA50
     if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
         return True, "BULLISH"
@@ -286,7 +279,12 @@ def send_telegram_message(message: str) -> bool:
             "text": message,
             "parse_mode": "HTML"
         }, timeout=10)
-        return response.status_code == 200
+        if response.status_code == 200:
+            log.info("✅ Telegram message sent")
+            return True
+        else:
+            log.error(f"Telegram error: {response.status_code}")
+            return False
     except Exception as e:
         log.error(f"Telegram error: {e}")
         return False
@@ -297,7 +295,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     log.info(f"🔍 Analyzing {asset_name}...")
     
     # Fetch data
-    prices = fetch_twelvedata_data(config['twelve_symbol'])
+    prices = fetch_twelvedata_data(config['symbol'])
     
     if not prices or len(prices) < 200:
         log.warning(f"⚠️ {asset_name}: Only {len(prices) if prices else 0} bars")
@@ -306,7 +304,6 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     # Check crossover
     has_cross, signal_type = check_ema_crossover(prices)
     if not has_cross:
-        log.info(f"📊 {asset_name} - No crossover detected")
         return None
     
     # Current values
@@ -347,6 +344,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     log.info(f"✅ SIGNAL DETECTED: {signal_type} at ${current_price:.2f}")
     log.info(f"   EMA50: ${ema50:.2f}, EMA200: ${ema200:.2f}")
     log.info(f"   ADX: {adx:.1f}")
+    log.info(f"   Entry: ${rr['entry']}, Stop: ${rr['stop_loss']}, Target: ${rr['take_profit']}")
     
     return {
         'signal_type': signal_type,
@@ -374,7 +372,7 @@ def format_signal_message(data: Dict) -> str:
     message = f"""<b>{arrow} {config['display_name']} - {direction} SIGNAL {arrow}</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
-📊 <b>EMA CROSSOVER (10-Min)</b>
+📊 <b>EMA CROSSOVER (15-Min)</b>
 ━━━━━━━━━━━━━━━━━━━━━
 • EMA50: ${data['ema50']:.2f}
 • EMA200: ${data['ema200']:.2f}
@@ -440,8 +438,10 @@ def test_api():
     test_symbol = "SPY"
     result = fetch_twelvedata_data(test_symbol)
     if result and len(result) > 0:
-        log.info(f"✅ API test successful! Got {len(result)} bars for {test_symbol}")
+        log.info(f"✅ API test successful!")
+        log.info(f"   Got {len(result)} bars for {test_symbol}")
         log.info(f"   Latest price: ${result[-1]['close']:.2f}")
+        log.info(f"   Data range: {result[0]['timestamp']} to {result[-1]['timestamp']}")
         return True
     else:
         log.error("❌ API test failed. Check your TWELVE_DATA_API_KEY")
@@ -449,16 +449,21 @@ def test_api():
 
 def main():
     log.info("=" * 70)
-    log.info("🚀 EMA CROSSOVER TRADING BOT - 10-MIN TIMEFRAME")
+    log.info("🚀 EMA CROSSOVER TRADING BOT - 15-MIN TIMEFRAME")
     log.info("=" * 70)
     log.info(f"Twelve Data API Key: {TWELVE_DATA_KEY[:8]}...")
+    log.info(f"Schedule: Every 5 minutes")
+    log.info(f"Cooldown: 12 hours between same signals")
+    log.info("=" * 70)
     
     # Test API first
     if not test_api():
         log.error("API test failed. Bot will exit.")
         return
     
-    log.info("Monitoring: GOLD, SPY, QQQ, ETH, ADA")
+    log.info("\n📊 Monitoring Assets:")
+    for name, config in ASSETS.items():
+        log.info(f"  • {config['display_name']} - Risk: {config['risk_percent']}% / Target: {config['profit_percent']}%")
     log.info("=" * 70)
     
     signals_sent = 0
@@ -477,17 +482,20 @@ def main():
                     else:
                         log.error(f"❌ Failed to send for {asset_name}")
                 else:
-                    log.info(f"⏭️ {asset_name} - cooldown active")
+                    log.info(f"⏭️ {asset_name} {result['signal_type']} - in cooldown")
             else:
-                log.info(f"📊 {asset_name} - No crossover")
+                log.info(f"📊 {asset_name} - No crossover detected")
             
-            # Rate limiting: 8 requests per minute for free tier
-            time.sleep(8)
+            # Small delay between API calls to be safe
+            time.sleep(2)
             
         except Exception as e:
             log.error(f"❌ Error with {asset_name}: {e}")
     
-    log.info(f"\n✅ Complete - Sent {signals_sent} signal(s)\n")
+    log.info(f"\n{'='*70}")
+    log.info(f"✅ Scan complete - {signals_sent} new signal(s) sent")
+    log.info(f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    log.info(f"{'='*70}\n")
 
 if __name__ == "__main__":
     main()
