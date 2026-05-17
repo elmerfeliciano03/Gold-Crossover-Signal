@@ -1,15 +1,13 @@
 import os
 import logging
 import requests
-import pandas as pd
-import numpy as np
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 import pytz
 from telegram import Bot
 import time
 import sys
-from typing import Dict, Optional, Tuple
-import json
+from typing import Dict, Optional, Tuple, List
 from pathlib import Path
 
 # Enable logging
@@ -30,9 +28,9 @@ ASSETS = {
         'symbol': 'XAUUSD',
         'alpha_symbol': 'XAUUSD',
         'timeframe': '10min',
-        'risk_percent': 0.5,  # 0.5% loss from entry
-        'profit_percent': 1.0,  # 1% profit from entry
-        'reward_ratio': 2,  # 1:2 reward:risk (1% profit / 0.5% loss = 2)
+        'risk_percent': 0.5,
+        'profit_percent': 1.0,
+        'reward_ratio': 2,
         'position_size': 10000,
         'currency': 'EUR',
         'broker_t212': 'Trading 212',
@@ -44,8 +42,8 @@ ASSETS = {
         'symbol': 'SPY',
         'alpha_symbol': 'SPY',
         'timeframe': '10min',
-        'risk_percent': 2,  # 2% risk
-        'profit_percent': 4,  # 4% profit (1:2 ratio)
+        'risk_percent': 2,
+        'profit_percent': 4,
         'reward_ratio': 2,
         'position_size': 2500,
         'currency': 'EUR',
@@ -58,8 +56,8 @@ ASSETS = {
         'symbol': 'QQQ',
         'alpha_symbol': 'QQQ',
         'timeframe': '10min',
-        'risk_percent': 1,  # 1% risk
-        'profit_percent': 2,  # 2% profit (1:2 movement)
+        'risk_percent': 1,
+        'profit_percent': 2,
         'reward_ratio': 2,
         'position_size': 2500,
         'currency': 'EUR',
@@ -72,8 +70,8 @@ ASSETS = {
         'symbol': 'ETHUSD',
         'alpha_symbol': 'ETH',
         'timeframe': '10min',
-        'risk_percent': 1,  # 1% risk
-        'profit_percent': 2,  # 2% profit (1:2 movement)
+        'risk_percent': 1,
+        'profit_percent': 2,
         'reward_ratio': 2,
         'position_size': 2500,
         'currency': 'EUR',
@@ -86,8 +84,8 @@ ASSETS = {
         'symbol': 'ADAUSD',
         'alpha_symbol': 'ADA',
         'timeframe': '10min',
-        'risk_percent': 1,  # 1% risk
-        'profit_percent': 2,  # 2% profit (1:2 movement)
+        'risk_percent': 1,
+        'profit_percent': 2,
         'reward_ratio': 2,
         'position_size': 2500,
         'currency': 'EUR',
@@ -98,6 +96,104 @@ ASSETS = {
     }
 }
 
+class SimpleDataProcessor:
+    """Simple data processing without pandas"""
+    
+    @staticmethod
+    def calculate_ema(prices: List[float], period: int) -> List[float]:
+        """Calculate EMA without pandas"""
+        if len(prices) < period:
+            return [0] * len(prices)
+        
+        ema = []
+        multiplier = 2 / (period + 1)
+        
+        # Start with SMA for first value
+        sma = sum(prices[:period]) / period
+        ema.append(sma)
+        
+        # Calculate subsequent EMAs
+        for i in range(period, len(prices)):
+            current_ema = (prices[i] - ema[-1]) * multiplier + ema[-1]
+            ema.append(current_ema)
+        
+        # Pad the beginning with zeros
+        padding = [0] * (period - 1)
+        return padding + ema
+    
+    @staticmethod
+    def calculate_true_range(high: float, low: float, prev_close: float) -> float:
+        """Calculate True Range"""
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low - prev_close)
+        return max(tr1, tr2, tr3)
+    
+    @staticmethod
+    def calculate_adx(prices: List[Dict], period: int = 14) -> float:
+        """Calculate ADX without pandas"""
+        if len(prices) < period * 2:
+            return 0
+        
+        tr_values = []
+        plus_dm_values = []
+        minus_dm_values = []
+        
+        # Calculate True Range and Directional Movements
+        for i in range(1, len(prices)):
+            high = prices[i]['high']
+            low = prices[i]['low']
+            close = prices[i-1]['close']
+            
+            tr = SimpleDataProcessor.calculate_true_range(high, low, close)
+            tr_values.append(tr)
+            
+            up_move = high - prices[i-1]['high']
+            down_move = prices[i-1]['low'] - low
+            
+            plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+            minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+            
+            plus_dm_values.append(plus_dm)
+            minus_dm_values.append(minus_dm)
+        
+        # Smooth with Wilder's method
+        atr = SimpleDataProcessor.calculate_wilder_sma(tr_values, period)
+        smoothed_plus_dm = SimpleDataProcessor.calculate_wilder_sma(plus_dm_values, period)
+        smoothed_minus_dm = SimpleDataProcessor.calculate_wilder_sma(minus_dm_values, period)
+        
+        if atr == 0:
+            return 0
+        
+        plus_di = 100 * (smoothed_plus_dm / atr)
+        minus_di = 100 * (smoothed_minus_dm / atr)
+        
+        if plus_di + minus_di == 0:
+            return 0
+        
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        
+        # Calculate ADX (smoothed DX)
+        dx_values = [dx]  # Simplified
+        adx = SimpleDataProcessor.calculate_wilder_sma(dx_values, period)
+        
+        return adx
+    
+    @staticmethod
+    def calculate_wilder_sma(values: List[float], period: int) -> float:
+        """Calculate Wilder's Smoothing (similar to EMA)"""
+        if len(values) < period:
+            return 0
+        
+        # Start with SMA
+        result = sum(values[:period]) / period
+        
+        # Wilder's smoothing
+        for i in range(period, len(values)):
+            result = (result * (period - 1) + values[i]) / period
+        
+        return result
+
 class AlphaVantageFetcher:
     """Fetch data from Alpha Vantage API"""
     
@@ -107,7 +203,7 @@ class AlphaVantageFetcher:
         self.cache_dir = Path('/tmp/alpha_cache')
         self.cache_dir.mkdir(exist_ok=True)
     
-    def get_cached_data(self, key: str, max_age_minutes: int = 10) -> Optional[pd.DataFrame]:
+    def get_cached_data(self, key: str, max_age_minutes: int = 10) -> Optional[List[Dict]]:
         """Get cached data to reduce API calls"""
         cache_file = self.cache_dir / f"{key}.json"
         if cache_file.exists():
@@ -116,48 +212,36 @@ class AlphaVantageFetcher:
                     data = json.load(f)
                 cache_time = datetime.fromisoformat(data['timestamp'])
                 if datetime.now() - cache_time < timedelta(minutes=max_age_minutes):
-                    df = pd.DataFrame(data['data'])
-                    df.index = pd.to_datetime(df.index)
                     logger.info(f"Using cached data for {key}")
-                    return df
+                    return data['data']
             except Exception as e:
                 logger.error(f"Cache read error for {key}: {e}")
         return None
     
-    def cache_data(self, key: str, df: pd.DataFrame):
+    def cache_data(self, key: str, data: List[Dict]):
         """Cache fetched data"""
         try:
             cache_file = self.cache_dir / f"{key}.json"
             with open(cache_file, 'w') as f:
                 json.dump({
                     'timestamp': datetime.now().isoformat(),
-                    'data': df.reset_index().to_dict('records')
+                    'data': data
                 }, f)
             logger.info(f"Cached data for {key}")
         except Exception as e:
             logger.error(f"Cache write error for {key}: {e}")
     
-    def fetch_intraday(self, symbol: str, interval: str = '10min') -> Optional[pd.DataFrame]:
+    def fetch_intraday(self, symbol: str, interval: str = '10min') -> Optional[List[Dict]]:
         """Fetch intraday data from Alpha Vantage with caching"""
         
         # Try cache first
         cache_key = f"{symbol}_{interval}"
-        cached_df = self.get_cached_data(cache_key)
-        if cached_df is not None:
-            return cached_df
+        cached_data = self.get_cached_data(cache_key)
+        if cached_data is not None:
+            return cached_data
         
         try:
-            interval_map = {
-                '10min': '10min',
-                '5min': '5min',
-                '15min': '15min',
-                '30min': '30min',
-                '60min': '60min'
-            }
-            
-            av_interval = interval_map.get(interval, '10min')
-            
-            # Handle different asset types
+            # Handle crypto symbols
             if symbol in ['ETH', 'ADA']:
                 params = {
                     'function': 'DIGITAL_CURRENCY_INTRADAY',
@@ -169,7 +253,7 @@ class AlphaVantageFetcher:
                 params = {
                     'function': 'TIME_SERIES_INTRADAY',
                     'symbol': symbol,
-                    'interval': av_interval,
+                    'interval': '10min',
                     'outputsize': 'full',
                     'apikey': self.api_key
                 }
@@ -178,106 +262,95 @@ class AlphaVantageFetcher:
             response.raise_for_status()
             data = response.json()
             
-            df = None
+            price_data = []
             
             # Parse response
             if 'Time Series' in data:
                 time_series_key = [k for k in data.keys() if 'Time Series' in k][0]
                 time_series = data[time_series_key]
-                df = pd.DataFrame.from_dict(time_series, orient='index')
-                df.index = pd.to_datetime(df.index)
-                df.sort_index(inplace=True)
-                df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-                df = df.astype(float)
                 
+                for timestamp, values in sorted(time_series.items(), reverse=False):
+                    price_data.append({
+                        'timestamp': timestamp,
+                        'open': float(values['1. open']),
+                        'high': float(values['2. high']),
+                        'low': float(values['3. low']),
+                        'close': float(values['4. close']),
+                        'volume': float(values['5. volume'])
+                    })
+                    
             elif 'Digital Currency Intraday' in data:
                 time_series = data['Digital Currency Intraday']
-                df = pd.DataFrame.from_dict(time_series, orient='index')
-                df.index = pd.to_datetime(df.index)
-                df.sort_index(inplace=True)
-                df['Open'] = df['1a. open (USD)'].astype(float)
-                df['High'] = df['2a. high (USD)'].astype(float)
-                df['Low'] = df['3a. low (USD)'].astype(float)
-                df['Close'] = df['4a. close (USD)'].astype(float)
-                df['Volume'] = df['5. volume'].astype(float)
+                
+                for timestamp, values in sorted(time_series.items(), reverse=False):
+                    price_data.append({
+                        'timestamp': timestamp,
+                        'open': float(values['1a. open (USD)']),
+                        'high': float(values['2a. high (USD)']),
+                        'low': float(values['3a. low (USD)']),
+                        'close': float(values['4a. close (USD)']),
+                        'volume': float(values['5. volume'])
+                    })
             
-            if df is not None and len(df) > 0:
+            if len(price_data) > 200:
                 # Cache the data
-                self.cache_data(cache_key, df)
-                logger.info(f"Fetched {len(df)} bars for {symbol}")
-                return df
+                self.cache_data(cache_key, price_data)
+                logger.info(f"Fetched {len(price_data)} bars for {symbol}")
+                return price_data
             else:
-                logger.error(f"No data returned for {symbol}")
+                logger.error(f"Insufficient data for {symbol}: {len(price_data)} bars")
                 return None
                 
         except Exception as e:
             logger.error(f"Error fetching {symbol}: {e}")
             return None
 
-class TechnicalAnalyzer:
-    """Technical analysis calculations"""
+class SignalBot:
+    """Main bot class for generating and sending signals"""
     
-    @staticmethod
-    def calculate_ema(df: pd.DataFrame, period: int) -> pd.Series:
-        """Calculate Exponential Moving Average"""
-        return df['Close'].ewm(span=period, adjust=False).mean()
+    def __init__(self, api_key: str, telegram_token: str, chat_id: str):
+        self.fetcher = AlphaVantageFetcher(api_key)
+        self.processor = SimpleDataProcessor()
+        self.telegram_bot = Bot(token=telegram_token)
+        self.chat_id = chat_id
+        self.last_signals = {}
     
-    @staticmethod
-    def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-        """Calculate ADX (Average Directional Index)"""
-        high = df['High']
-        low = df['Low']
-        close = df['Close']
+    def calculate_indicators(self, price_data: List[Dict]):
+        """Calculate EMAs from price data"""
+        closes = [p['close'] for p in price_data]
         
-        # True Range
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        # Calculate EMAs
+        ema50 = self.processor.calculate_ema(closes, 50)
+        ema200 = self.processor.calculate_ema(closes, 200)
         
-        # Directional Movement
-        up_move = high - high.shift()
-        down_move = low.shift() - low
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smooth with Wilder's smoothing
-        atr = tr.ewm(span=period, adjust=False).mean()
-        plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / atr)
-        minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / atr)
-        
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.ewm(span=period, adjust=False).mean()
-        
-        return adx
+        return ema50, ema200
     
-    @staticmethod
-    def check_crossover(df: pd.DataFrame, fast_period: int = 50, slow_period: int = 200) -> Tuple[bool, Optional[str]]:
-        """Check for EMA crossover (EMA200 crosses EMA50 on 10-min timeframe)"""
-        if len(df) < slow_period + 1:
+    def check_crossover(self, price_data: List[Dict]) -> Tuple[bool, Optional[str]]:
+        """Check for EMA200 crossing EMA50"""
+        if len(price_data) < 200:
             return False, None
         
-        ema_fast = TechnicalAnalyzer.calculate_ema(df, fast_period)
-        ema_slow = TechnicalAnalyzer.calculate_ema(df, slow_period)
+        closes = [p['close'] for p in price_data]
+        ema50 = self.processor.calculate_ema(closes, 50)
+        ema200 = self.processor.calculate_ema(closes, 200)
         
-        current_fast = ema_fast.iloc[-1]
-        current_slow = ema_slow.iloc[-1]
-        prev_fast = ema_fast.iloc[-2]
-        prev_slow = ema_slow.iloc[-2]
+        if len(ema50) < 2 or len(ema200) < 2:
+            return False, None
         
-        # Crossover detection (EMA200 crosses EMA50)
-        # Bullish: EMA200 crosses ABOVE EMA50
-        if prev_slow <= prev_fast and current_slow > current_fast:
+        current_ema50 = ema50[-1]
+        current_ema200 = ema200[-1]
+        prev_ema50 = ema50[-2]
+        prev_ema200 = ema200[-2]
+        
+        # Check for crossover (EMA200 crosses EMA50)
+        if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
             return True, "BULLISH 🟢"
-        # Bearish: EMA200 crosses BELOW EMA50
-        elif prev_slow >= prev_fast and current_slow < current_fast:
+        elif prev_ema200 >= prev_ema50 and current_ema200 < current_ema50:
             return True, "BEARISH 🔴"
         
         return False, None
     
-    @staticmethod
-    def calculate_risk_reward(current_price: float, signal_type: str, risk_percent: float, profit_percent: float):
+    def calculate_risk_reward(self, current_price: float, signal_type: str, risk_percent: float, profit_percent: float) -> Dict:
         """Calculate precise risk and reward levels"""
         if "BULLISH" in signal_type:
             entry = current_price
@@ -285,14 +358,13 @@ class TechnicalAnalyzer:
             take_profit = entry * (1 + profit_percent / 100)
             risk_amount = entry - stop_loss
             reward_amount = take_profit - entry
-        else:  # BEARISH
+        else:
             entry = current_price
             stop_loss = entry * (1 + risk_percent / 100)
             take_profit = entry * (1 - profit_percent / 100)
             risk_amount = stop_loss - entry
             reward_amount = entry - take_profit
         
-        # Calculate actual ratio
         actual_ratio = round(reward_amount / risk_amount, 2) if risk_amount > 0 else 0
         
         return {
@@ -305,13 +377,9 @@ class TechnicalAnalyzer:
             'profit_percent': profit_percent,
             'actual_ratio': actual_ratio
         }
-
-class PositionCalculator:
-    """Calculate position sizing for different brokers"""
     
-    @staticmethod
-    def calculate_t212_position(position_size: float, entry_price: float, stop_loss: float, currency: str = 'EUR') -> Dict:
-        """Calculate Trading 212 position details"""
+    def calculate_position_t212(self, position_size: float, entry_price: float, stop_loss: float, currency: str = 'EUR') -> Dict:
+        """Calculate Trading 212 position"""
         risk_per_share = abs(entry_price - stop_loss)
         shares = int(position_size / entry_price) if entry_price > 0 else 0
         total_value = shares * entry_price
@@ -321,117 +389,98 @@ class PositionCalculator:
             'shares': shares,
             'total_value': round(total_value, 2),
             'total_risk': round(total_risk, 2),
-            'currency': currency,
-            'broker': 'Trading 212'
+            'currency': currency
         }
     
-    @staticmethod
-    def calculate_mt5_position(entry_price: float, stop_loss: float, units: float, asset_type: str) -> Dict:
-        """Calculate MT5 position details"""
-        if asset_type == 'commodity':  # Gold
+    def calculate_position_mt5(self, entry_price: float, stop_loss: float, units: float, asset_type: str) -> Dict:
+        """Calculate MT5 position"""
+        if asset_type == 'commodity':
             pip_size = 0.01
-            point_value = units * 100  # 1 unit = 100 oz for gold
+            point_value = units * 100
             risk_pips = abs(entry_price - stop_loss) / pip_size
             total_risk = risk_pips * point_value
             
             return {
                 'units': units,
                 'risk_pips': round(risk_pips, 1),
-                'total_risk': round(total_risk, 2),
-                'broker': 'MT5',
-                'asset_type': 'Gold (XAUUSD)'
+                'total_risk': round(total_risk, 2)
             }
-        elif asset_type == 'etf':  # SPY
-            point_value = units * 100000  # Standard forex lot sizing
+        elif asset_type == 'etf':
+            point_value = units * 100000
             risk_points = abs(entry_price - stop_loss)
             total_risk = risk_points * point_value
             
             return {
                 'units': units,
                 'risk_points': round(risk_points, 2),
-                'total_risk': round(total_risk, 2),
-                'broker': 'MT5',
-                'asset_type': 'SPY ETF'
+                'total_risk': round(total_risk, 2)
             }
         
-        return {'broker': 'MT5', 'note': 'Standard position sizing'}
-
-class SignalBot:
-    """Main bot class for generating and sending signals"""
+        return {}
     
-    def __init__(self, api_key: str, telegram_token: str, chat_id: str):
-        self.fetcher = AlphaVantageFetcher(api_key)
-        self.analyzer = TechnicalAnalyzer()
-        self.position_calc = PositionCalculator()
-        self.telegram_bot = Bot(token=telegram_token)
-        self.chat_id = chat_id
-        self.last_signals = {}  # Store last signal to avoid duplicates
-        
     def analyze_asset(self, asset_name: str, config: Dict) -> Optional[Dict]:
         """Analyze single asset for signals"""
         logger.info(f"Analyzing {asset_name}...")
         
         # Fetch data
-        df = self.fetcher.fetch_intraday(config['alpha_symbol'], config['timeframe'])
-        if df is None or len(df) < 210:  # Need at least 200+ bars for EMA200
-            logger.warning(f"Insufficient data for {asset_name} (only {len(df) if df is not None else 0} bars)")
+        price_data = self.fetcher.fetch_intraday(config['alpha_symbol'], config['timeframe'])
+        if price_data is None or len(price_data) < 210:
+            logger.warning(f"Insufficient data for {asset_name}")
             return None
         
-        # Calculate indicators
-        ema50 = self.analyzer.calculate_ema(df, 50)
-        ema200 = self.analyzer.calculate_ema(df, 200)
-        adx = self.analyzer.calculate_adx(df, 14)
-        
         # Check for crossover
-        has_crossover, signal_type = self.analyzer.check_crossover(df, 50, 200)
+        has_crossover, signal_type = self.check_crossover(price_data)
         
         if not has_crossover:
             logger.info(f"No EMA crossover for {asset_name}")
             return None
         
-        current_price = df['Close'].iloc[-1]
-        current_adx = adx.iloc[-1]
-        current_ema50 = ema50.iloc[-1]
-        current_ema200 = ema200.iloc[-1]
+        current_price = price_data[-1]['close']
         
-        # Check if ADX is valid
-        if pd.isna(current_adx):
-            current_adx = 0
+        # Get latest ADX
+        adx = self.processor.calculate_adx(price_data, 14)
         
-        # ADX strength interpretation
-        if current_adx > 40:
+        # Calculate EMAs for display
+        closes = [p['close'] for p in price_data]
+        ema50_list = self.processor.calculate_ema(closes, 50)
+        ema200_list = self.processor.calculate_ema(closes, 200)
+        
+        current_ema50 = ema50_list[-1] if ema50_list else 0
+        current_ema200 = ema200_list[-1] if ema200_list else 0
+        
+        # ADX strength
+        if adx > 40:
             adx_strength = "VERY STRONG 🔥"
             adx_comment = "Strong trending market"
-        elif current_adx > 25:
+        elif adx > 25:
             adx_strength = "STRONG ✅"
             adx_comment = "Good trend strength"
-        elif current_adx > 20:
+        elif adx > 20:
             adx_strength = "MODERATE 📊"
             adx_comment = "Trend developing"
         else:
             adx_strength = "WEAK ⚠️"
             adx_comment = "Range-bound market"
         
-        # Calculate risk/reward using specific percentages
-        rr = self.analyzer.calculate_risk_reward(
-            current_price, 
-            signal_type, 
-            config['risk_percent'], 
+        # Calculate risk/reward
+        rr = self.calculate_risk_reward(
+            current_price,
+            signal_type,
+            config['risk_percent'],
             config['profit_percent']
         )
         
-        # Calculate T212 position
-        t212_position = self.position_calc.calculate_t212_position(
-            config['position_size'], 
-            rr['entry'], 
+        # Calculate positions
+        t212_pos = self.calculate_position_t212(
+            config['position_size'],
+            rr['entry'],
             rr['stop_loss'],
             config.get('currency', 'EUR')
         )
         
-        # Calculate MT5 position if applicable
-        mt5_position = None
+        mt5_pos = None
         if config.get('mt5_units'):
-            mt5_position = self.position_calc.calculate_mt5_position(
+            mt5_pos = self.calculate_position_mt5(
                 rr['entry'],
                 rr['stop_loss'],
                 config['mt5_units'],
@@ -440,19 +489,18 @@ class SignalBot:
         
         return {
             'asset': asset_name,
-            'symbol': config['symbol'],
             'signal_type': signal_type,
             'current_price': round(current_price, 4),
             'ema50': round(current_ema50, 4),
             'ema200': round(current_ema200, 4),
-            'adx': round(current_adx, 2),
+            'adx': round(adx, 2),
             'adx_strength': adx_strength,
             'adx_comment': adx_comment,
             'risk_reward': rr,
             'position_size': config['position_size'],
             'currency': config.get('currency', 'EUR'),
-            't212_position': t212_position,
-            'mt5_position': mt5_position,
+            't212_position': t212_pos,
+            'mt5_position': mt5_pos,
             'timestamp': datetime.now(pytz.UTC)
         }
     
@@ -478,51 +526,30 @@ class SignalBot:
 ━━━━━━━━━━━━━━━━━━━━━
 ⚡ <b>RISK MANAGEMENT</b>
 ━━━━━━━━━━━━━━━━━━━━━
-"""
-        
-        # Custom message for Gold (specific .5% loss, 1% profit)
-        if signal['asset'] == 'GOLD':
-            message += f"""
-• <b>Stop Loss:</b> {rr['risk_percent']}% from entry
-• <b>Take Profit:</b> {rr['profit_percent']}% from entry
-• <b>Risk:Reward Ratio:</b> 1:{rr['actual_ratio']}
+• Stop Loss: {rr['risk_percent']}% from entry
+• Take Profit: {rr['profit_percent']}% from entry
+• Risk:Reward Ratio: 1:{rr['actual_ratio']}
 
 📍 <b>Levels:</b>
 • Entry: ${rr['entry']}
-• Stop Loss: ${rr['stop_loss']} (-{rr['risk_percent']}%)
-• Take Profit: ${rr['take_profit']} (+{rr['profit_percent']}%)
+• Stop Loss: ${rr['stop_loss']}
+• Take Profit: ${rr['take_profit']}
 
-"""
-        else:
-            message += f"""
-• <b>Risk per trade:</b> {rr['risk_percent']}% of capital
-• <b>Target profit:</b> {rr['profit_percent']}% ({rr['profit_percent']/rr['risk_percent']}:1 ratio)
-• <b>Risk:Reward Ratio:</b> 1:{rr['actual_ratio']}
-
-📍 <b>Levels:</b>
-• Entry: ${rr['entry']}
-• Stop Loss: ${rr['stop_loss']} ({'-' + str(rr['risk_percent']) + '%' if 'BULLISH' in signal['signal_type'] else '+' + str(rr['risk_percent']) + '%'})
-• Take Profit: ${rr['take_profit']} ({'+' + str(rr['profit_percent']) + '%' if 'BULLISH' in signal['signal_type'] else '-' + str(rr['profit_percent']) + '%'})
-
-"""
-        
-        message += f"""
 ━━━━━━━━━━━━━━━━━━━━━
 💼 <b>POSITION SIZING</b>
 ━━━━━━━━━━━━━━━━━━━━━
 
-📱 <b>{signal['t212_position']['broker']}:</b>
+📱 <b>Trading 212:</b>
 • Capital: {signal['position_size']} {signal['currency']}
 • Shares: {signal['t212_position']['shares']} units
 • Position Value: {signal['t212_position']['total_value']} {signal['currency']}
 • Total Risk: {signal['t212_position']['total_risk']} {signal['currency']}
 """
         
-        # Add MT5 position if available
-        if signal['mt5_position'] and 'units' in signal['mt5_position']:
+        if signal['mt5_position']:
             mt5 = signal['mt5_position']
             message += f"""
-💹 <b>{mt5['broker']} ({mt5['asset_type']}):</b>
+💹 <b>MT5:</b>
 • Units: {mt5['units']}
 """
             if 'risk_pips' in mt5:
@@ -534,7 +561,6 @@ class SignalBot:
 • Total Risk: ${mt5['total_risk']}
 """
         
-        # Add disclaimer
         message += f"""
 ━━━━━━━━━━━━━━━━━━━━━
 ⏰ <i>Signal Time: {signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S UTC')}</i>
@@ -542,7 +568,6 @@ class SignalBot:
 ⚠️ <b>DISCLAIMER</b>
 This signal is based on EMA200 crossing EMA50 on 10-minute timeframe.
 Always conduct your own analysis before trading.
-Past performance does not guarantee future results.
 
 <i>🤖 Multi-Asset Trading Bot | 10-Minute EMA Crossover Strategy</i>
 """
@@ -555,14 +580,13 @@ Past performance does not guarantee future results.
             last_time, last_type = self.last_signals[asset]
             time_diff = (datetime.now(pytz.UTC) - last_time).total_seconds() / 3600
             if time_diff < 12 and last_type == signal_type:
-                logger.info(f"Duplicate {signal_type} signal for {asset} ignored (last sent {time_diff:.1f} hours ago)")
+                logger.info(f"Duplicate {signal_type} signal for {asset} ignored")
                 return True
         return False
     
     def send_signal(self, signal: Dict):
         """Send signal to Telegram"""
         try:
-            # Check for duplicate
             if self.is_duplicate_signal(signal['asset'], signal['signal_type']):
                 return
             
@@ -575,11 +599,10 @@ Past performance does not guarantee future results.
             )
             logger.info(f"✅ Signal sent for {signal['asset']}")
             
-            # Store last signal
             self.last_signals[signal['asset']] = (signal['timestamp'], signal['signal_type'])
             
         except Exception as e:
-            logger.error(f"Failed to send signal for {signal['asset']}: {e}")
+            logger.error(f"Failed to send signal: {e}")
     
     def run_analysis(self):
         """Run analysis for all assets"""
@@ -592,8 +615,7 @@ Past performance does not guarantee future results.
         
         for asset_name, config in ASSETS.items():
             try:
-                # Add delay between API calls to avoid rate limiting
-                time.sleep(3)
+                time.sleep(2)  # Rate limiting
                 
                 signal = self.analyze_asset(asset_name, config)
                 if signal:
@@ -604,31 +626,20 @@ Past performance does not guarantee future results.
                 logger.error(f"❌ Error analyzing {asset_name}: {e}")
         
         if signals_found:
-            logger.info(f"✅ Found {len(signals_found)} signals: {[s['asset'] for s in signals_found]}")
+            logger.info(f"✅ Found {len(signals_found)} signals")
         else:
-            logger.info("📊 No signals detected for any asset")
+            logger.info("📊 No signals detected")
         
         logger.info("=" * 70)
-        logger.info("Analysis complete")
-        logger.info("=" * 70)
-
-# Import timedelta for caching
-from datetime import timedelta
 
 def main():
-    """Main function - runs on cron trigger"""
-    # Validate environment variables
+    """Main function"""
     if not all([TELEGRAM_TOKEN, CHAT_ID, ALPHA_VANTAGE_API_KEY]):
         logger.error("❌ Missing required environment variables!")
-        logger.error("Required: TELEGRAM_TOKEN, CHAT_ID, ALPHA_VANTAGE_API_KEY")
         sys.exit(1)
     
-    logger.info("🤖 QQQ Trading Bot Starting...")
-    logger.info(f"Bot Token: {'✓' if TELEGRAM_TOKEN else '✗'}")
-    logger.info(f"Chat ID: {'✓' if CHAT_ID else '✗'}")
-    logger.info(f"Alpha Vantage API: {'✓' if ALPHA_VANTAGE_API_KEY else '✗'}")
+    logger.info("🤖 Multi-Asset Trading Bot Starting...")
     
-    # Create and run bot
     bot = SignalBot(ALPHA_VANTAGE_API_KEY, TELEGRAM_TOKEN, CHAT_ID)
     bot.run_analysis()
 
