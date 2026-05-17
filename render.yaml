@@ -1,9 +1,13 @@
 services:
-  - type: cron
-    name: gold-bot
-    schedule: "*/2 * * * *"
-    runtime: python3
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: python gold_bot.py
+  - type: cron-job
+    name: multi-asset-trading-bot
+    schedule: "*/3 * * * *"  # Every 3 minutes
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
