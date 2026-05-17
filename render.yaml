@@ -1,6 +1,6 @@
 services:
   - type: cron-job
-    name: multi-asset-trading-bot
+    name: multi-asset-ema-bot
     schedule: "*/3 * * * *"  # Every 3 minutes
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
