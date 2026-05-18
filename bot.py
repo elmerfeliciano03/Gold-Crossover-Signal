@@ -49,7 +49,7 @@ try:
 except:
     IRISH_TZ = timezone.utc
 
-# Asset configurations (UPDATED: Added GBP/USD)
+# Asset configurations
 ASSETS = {
     "GOLD": {
         "symbol": "XAU/USD",
@@ -60,7 +60,7 @@ ASSETS = {
         "currency": "EUR",
         "mt5_units": 0.03,
         "api_key": TWELVE_DATA_KEY_MAIN,
-        "point_value": 0.01  # Gold moves in $0.01 increments
+        "point_value": 0.01
     },
     "SPY": {
         "symbol": "SPY",
@@ -93,7 +93,7 @@ ASSETS = {
         "currency": "EUR",
         "mt5_units": 0.03,
         "api_key": TWELVE_DATA_KEY_FOREX,
-        "point_value": 0.0001  # Forex moves in pips (0.0001)
+        "point_value": 0.0001
     },
     "USDJPY": {
         "symbol": "USD/JPY",
@@ -104,7 +104,7 @@ ASSETS = {
         "currency": "EUR",
         "mt5_units": 0.03,
         "api_key": TWELVE_DATA_KEY_FOREX,
-        "point_value": 0.01  # JPY pairs move in 0.01 (pip = 0.01)
+        "point_value": 0.01
     },
     "GBPUSD": {
         "symbol": "GBP/USD",
@@ -115,7 +115,7 @@ ASSETS = {
         "currency": "EUR",
         "mt5_units": 0.03,
         "api_key": TWELVE_DATA_KEY_FOREX,
-        "point_value": 0.0001  # Forex moves in pips (0.0001)
+        "point_value": 0.0001
     }
 }
 
@@ -636,7 +636,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     position_value = shares * rr['entry']
     total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
     
-    log.info(f"✅ {signal_type} at {rr['entry']:.5f if last_closed_price < 10 else rr['entry']:.3f}")
+    log.info(f"✅ {signal_type} signal detected")
     
     return {
         'signal_type': signal_type,
@@ -816,4 +816,15 @@ def main():
             update_health('completed_with_errors', f"Sent {signals_sent} signals, {failures} failures")
         
         log.info(f"\n{'='*70}")
-        log.info(f"✅ Scan complete - {signals_sent} signals
+        log.info(f"✅ Scan complete - {signals_sent} signals sent, {failures} failures")
+        log.info(f"🕐 Irish Time: {get_irish_time().strftime('%Y-%m-%d %H:%M:%S')}")
+        log.info(f"{'='*70}\n")
+        
+    except Exception as e:
+        error_msg = str(e)
+        log.error(f"❌ FATAL ERROR: {error_msg}")
+        update_health('failed', error_msg)
+        send_failure_alert("SYSTEM", error_msg)
+
+if __name__ == "__main__":
+    main()
