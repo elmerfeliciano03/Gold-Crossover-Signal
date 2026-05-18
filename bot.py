@@ -6,7 +6,7 @@ Strategies:
 1. EMA Crossover (EMA200 crosses EMA50) - Based on last closed candle
 2. Pullback to EMA20 - Based on last closed candle
 
-Assets: GOLD, SPY, QQQ, EUR/USD, USD/JPY
+Assets: GOLD, SPY, QQQ, EUR/USD, USD/JPY, GBP/USD
 """
 
 import os
@@ -49,7 +49,7 @@ try:
 except:
     IRISH_TZ = timezone.utc
 
-# Asset configurations (UPDATED: Removed ETH/ADA, added EUR/USD and USD/JPY)
+# Asset configurations (UPDATED: Added GBP/USD)
 ASSETS = {
     "GOLD": {
         "symbol": "XAU/USD",
@@ -105,6 +105,17 @@ ASSETS = {
         "mt5_units": 0.03,
         "api_key": TWELVE_DATA_KEY_FOREX,
         "point_value": 0.01  # JPY pairs move in 0.01 (pip = 0.01)
+    },
+    "GBPUSD": {
+        "symbol": "GBP/USD",
+        "display_name": "💷 GBP/USD",
+        "risk_percent": 0.5,
+        "profit_percent": 1.0,
+        "position_size": 10000,
+        "currency": "EUR",
+        "mt5_units": 0.03,
+        "api_key": TWELVE_DATA_KEY_FOREX,
+        "point_value": 0.0001  # Forex moves in pips (0.0001)
     }
 }
 
@@ -262,7 +273,7 @@ def send_daily_report():
 
 🕐 <b>Next Report:</b> Tomorrow at 9:00 AM Irish Time
 
-<i>🤖 Automated health report - Bot is monitoring 5 assets on 15-min timeframe</i>"""
+<i>🤖 Automated health report - Bot is monitoring 6 assets on 15-min timeframe</i>"""
     
     send_telegram_message(message, admin=True)
     health['last_daily_report'] = datetime.now(timezone.utc).isoformat()
@@ -281,12 +292,13 @@ def send_startup_message():
 📊 <b>Last Status:</b> {last_status}
 ⚠️ <b>Last Failure:</b> {last_failure}
 
-📈 <b>Currently Monitoring (5 assets):</b>
+📈 <b>Currently Monitoring (6 assets):</b>
 • 💰 GOLD
 • 📈 SPY
 • 🚀 QQQ
 • 💶 EUR/USD
 • 💴 USD/JPY
+• 💷 GBP/USD
 
 ⏰ <b>Schedule:</b> Every 6 minutes
 🛡️ <b>Cooldown:</b> 12 hours between signals
@@ -746,7 +758,7 @@ def format_signal_message(data: Dict) -> str:
 def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER + PULLBACK BOT - 15-MIN TIMEFRAME")
-    log.info("📊 Monitoring: GOLD, SPY, QQQ, EUR/USD, USD/JPY")
+    log.info("📊 Monitoring: GOLD, SPY, QQQ, EUR/USD, USD/JPY, GBP/USD")
     log.info("📊 Based on LAST CLOSED CANDLE (no repainting)")
     log.info("=" * 70)
     
@@ -804,15 +816,4 @@ def main():
             update_health('completed_with_errors', f"Sent {signals_sent} signals, {failures} failures")
         
         log.info(f"\n{'='*70}")
-        log.info(f"✅ Scan complete - {signals_sent} signals sent, {failures} failures")
-        log.info(f"🕐 Irish Time: {get_irish_time().strftime('%Y-%m-%d %H:%M:%S')}")
-        log.info(f"{'='*70}\n")
-        
-    except Exception as e:
-        error_msg = str(e)
-        log.error(f"❌ FATAL ERROR: {error_msg}")
-        update_health('failed', error_msg)
-        send_failure_alert("SYSTEM", error_msg)
-
-if __name__ == "__main__":
-    main()
+        log.info(f"✅ Scan complete - {signals_sent} signals
