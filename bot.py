@@ -1,6 +1,10 @@
 """
-EMA Crossover Trading Bot - 15-Minute Timeframe
+EMA Crossover + Pullback Trading Bot - 10-Minute Timeframe
 With Smart Health Monitoring (Daily Report at 9AM Irish Time)
+
+Strategies:
+1. EMA Crossover (EMA200 crosses EMA50) - Based on last closed candle
+2. Pullback to EMA20 - Based on last closed candle
 """
 
 import os
@@ -96,6 +100,12 @@ ASSETS = {
         "api_key": TWELVE_DATA_KEY_CRYPTO
     }
 }
+
+# Pullback configuration
+PULLBACK_EMA = 20
+PULLBACK_RETRACE_PERCENT = 0.382  # Fibonacci 38.2% retracement
+PULLBACK_MIN_RSI = 40
+PULLBACK_MAX_RSI = 60
 
 def get_irish_time():
     """Get current Irish time"""
@@ -196,14 +206,13 @@ def should_send_startup_message() -> bool:
     last_startup_irish = last_startup_time.astimezone(IRISH_TZ)
     hours_since_startup = (irish_now - last_startup_irish).total_seconds() / 3600
     
-    return had_recent_failure and hours_since_startup > 1  # Don't spam, wait at least 1 hour
+    return had_recent_failure and hours_since_startup > 1
 
 def send_daily_report():
     """Send daily health report at 9 AM Irish time (ONCE per day)"""
     health = load_tracker(HEALTH_FILE)
     irish_now = get_irish_time()
     
-    # Calculate success rate
     total_runs = health.get('run_count', 0)
     failures = health.get('failures', 0)
     success_rate = ((total_runs - failures) / total_runs * 100) if total_runs > 0 else 100
@@ -211,7 +220,6 @@ def send_daily_report():
     last_run = health.get('last_run_irish', 'Never')
     last_failure = health.get('last_failure_irish', 'No failures in last 24h')
     
-    # Get last 24 hours signals
     signals = load_tracker(COOLDOWN_FILE)
     today_signals = []
     yesterday = (irish_now - timedelta(days=1)).timestamp()
@@ -220,7 +228,6 @@ def send_daily_report():
         if timestamp > yesterday:
             today_signals.append(key)
     
-    # Get status emoji
     if failures == 0:
         status_emoji = "✅ HEALTHY"
     elif failures < 3:
@@ -247,9 +254,12 @@ def send_daily_report():
     if today_signals:
         message += f"\n📋 <b>Recent Signals:</b>\n"
         for sig in today_signals[:5]:
-            asset, signal_type = sig.rsplit('_', 1)
-            emoji = "🟢" if signal_type == "BULLISH" else "🔴"
-            message += f"  {emoji} {asset}: {signal_type}\n"
+            parts = sig.rsplit('_', 1)
+            if len(parts) == 2:
+                asset, signal_type = parts
+                emoji = "🟢" if "BULLISH" in signal_type or "PULLBACK_LONG" in signal_type else "🔴"
+                signal_name = signal_type.replace('_', ' ').title()
+                message += f"  {emoji} {asset}: {signal_name}\n"
     else:
         message += "\n  • No signals detected in last 24h\n"
     
@@ -259,11 +269,10 @@ def send_daily_report():
 
 🕐 <b>Next Report:</b> Tomorrow at 9:00 AM Irish Time
 
-<i>🤖 Automated health report - Bot is monitoring 5 assets</i>"""
+<i>🤖 Automated health report - Bot is monitoring 5 assets on 10-min timeframe</i>"""
     
     send_telegram_message(message, admin=True)
     
-    # Mark report as sent
     health['last_daily_report'] = datetime.now(timezone.utc).isoformat()
     save_tracker(HEALTH_FILE, health)
 
@@ -282,20 +291,20 @@ def send_startup_message():
 ⚠️ <b>Last Failure:</b> {last_failure}
 
 📈 <b>Currently Monitoring:</b>
-• GOLD (0.5% risk)
-• SPY (2% risk)
-• QQQ (1% risk)
-• ETH (1% risk)
-• ADA (1% risk)
+• GOLD (0.5% risk) - 10-min Timeframe
+• SPY (2% risk) - 10-min Timeframe
+• QQQ (1% risk) - 10-min Timeframe
+• ETH (1% risk) - 10-min Timeframe
+• ADA (1% risk) - 10-min Timeframe
 
 ⏰ <b>Schedule:</b> Every 6 minutes
 🛡️ <b>Cooldown:</b> 12 hours between signals
+📊 <b>Signal Logic:</b> Based on LAST CLOSED CANDLE (no repainting)
 
 <i>Bot is back online and monitoring for signals</i>"""
     
     send_telegram_message(message, admin=True)
     
-    # Mark startup as sent
     health['last_startup_message'] = datetime.now(timezone.utc).isoformat()
     save_tracker(HEALTH_FILE, health)
 
@@ -305,12 +314,11 @@ def send_failure_alert(asset_name: str, error: str):
     health = load_tracker(HEALTH_FILE)
     failures_today = health.get('failures', 0)
     
-    # Don't spam if too many failures (throttle)
     last_alert = health.get('last_failure_alert')
     if last_alert:
         last_alert_time = datetime.fromisoformat(last_alert)
         seconds_since_alert = (datetime.now(timezone.utc) - last_alert_time).total_seconds()
-        if seconds_since_alert < 300:  # 5 minutes cooldown on alerts
+        if seconds_since_alert < 300:
             log.info("⏭️ Skipping duplicate failure alert (throttled)")
             return
     
@@ -332,8 +340,8 @@ def send_failure_alert(asset_name: str, error: str):
     health['last_failure_alert'] = datetime.now(timezone.utc).isoformat()
     save_tracker(HEALTH_FILE, health)
 
-def fetch_twelvedata_data(symbol: str, api_key: str) -> Optional[List[Dict]]:
-    """Fetch 15-minute data from Twelve Data API"""
+def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -> Optional[List[Dict]]:
+    """Fetch 10-minute data from Twelve Data API (using last closed candle)"""
     if not api_key:
         return None
         
@@ -341,12 +349,12 @@ def fetch_twelvedata_data(symbol: str, api_key: str) -> Optional[List[Dict]]:
         url = f"https://api.twelvedata.com/time_series"
         params = {
             'symbol': symbol,
-            'interval': '15min',
-            'outputsize': '500',
+            'interval': '10min',  # Changed from 15min to 10min
+            'outputsize': str(lookback_bars),
             'apikey': api_key
         }
         
-        log.info(f"Fetching {symbol}...")
+        log.info(f"Fetching {symbol} (10-min timeframe)...")
         response = requests.get(url, params=params, timeout=15)
         data = response.json()
         
@@ -392,8 +400,32 @@ def calculate_ema_series(prices: List[float], period: int) -> List[float]:
     
     return ema_values
 
+def calculate_rsi(closes: List[float], period: int = 14) -> float:
+    """Calculate RSI using last closed candles"""
+    if len(closes) < period + 1:
+        return 50
+    
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        diff = closes[-i] - closes[-i-1]
+        if diff > 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(diff))
+    
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    
+    if avg_loss == 0:
+        return 100
+    
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
 def calculate_adx(prices: List[Dict], period: int = 14) -> float:
-    """Calculate ADX"""
+    """Calculate ADX using last closed candles"""
     if len(prices) < period * 2:
         return 0
     
@@ -427,7 +459,10 @@ def calculate_adx(prices: List[Dict], period: int = 14) -> float:
     return 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
 
 def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
-    """Check for EMA200 crossing EMA50"""
+    """
+    Check for EMA200 crossing EMA50
+    CRITICAL: Uses LAST CLOSED CANDLE (index -2) to avoid repainting
+    """
     if len(prices) < 200:
         return False, None
     
@@ -435,33 +470,125 @@ def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
     ema50 = calculate_ema_series(closes, 50)
     ema200 = calculate_ema_series(closes, 200)
     
-    if len(ema50) < 2 or len(ema200) < 2:
+    if len(ema50) < 3 or len(ema200) < 3:
         return False, None
     
-    current_ema50, current_ema200 = ema50[-1], ema200[-1]
-    prev_ema50, prev_ema200 = ema50[-2], ema200[-2]
+    # IMPORTANT: Use index -2 (last closed candle), NOT -1 (current forming candle)
+    current_ema50 = ema50[-2]
+    current_ema200 = ema200[-2]
+    prev_ema50 = ema50[-3]
+    prev_ema200 = ema200[-3]
     
+    # BULLISH CROSSOVER: EMA200 crosses ABOVE EMA50
     if prev_ema200 <= prev_ema50 and current_ema200 > current_ema50:
-        return True, "BULLISH"
+        return True, "BULLISH_CROSSOVER"
+    
+    # BEARISH CROSSOVER: EMA200 crosses BELOW EMA50
     elif prev_ema200 >= prev_ema50 and current_ema200 < current_ema50:
-        return True, "BEARISH"
+        return True, "BEARISH_CROSSOVER"
     
     return False, None
 
-def calculate_risk_reward(price: float, signal_type: str, risk_pct: float, profit_pct: float) -> Dict:
-    """Calculate levels"""
-    if signal_type == "BULLISH":
-        entry, stop_loss, take_profit = price, price * (1 - risk_pct / 100), price * (1 + profit_pct / 100)
-    else:
-        entry, stop_loss, take_profit = price, price * (1 + risk_pct / 100), price * (1 - profit_pct / 100)
+def check_pullback_signal(prices: List[Dict], trend_direction: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check for pullback entry within existing trend
+    CRITICAL: Uses LAST CLOSED CANDLE (index -2) to avoid repainting
+    """
+    if len(prices) < 50:
+        return False, None
     
-    risk_amount, reward_amount = abs(entry - stop_loss), abs(take_profit - entry)
+    closes = [p['close'] for p in prices]
+    highs = [p['high'] for p in prices]
+    lows = [p['low'] for p in prices]
+    
+    ema20 = calculate_ema_series(closes, PULLBACK_EMA)
+    
+    if len(ema20) < 10:
+        return False, None
+    
+    # IMPORTANT: Use index -2 (last closed candle)
+    current_price = closes[-2]
+    current_ema = ema20[-2]
+    prev_price = closes[-3]
+    prev_ema = ema20[-3]
+    
+    rsi = calculate_rsi(closes, 14)
+    
+    # Use last 20 closed candles for swing points
+    recent_high = max(highs[-21:-1])  # Exclude current forming candle
+    recent_low = min(lows[-21:-1])
+    range_size = recent_high - recent_low
+    
+    if trend_direction == "BULLISH":
+        # Price should be in uptrend (above EMA20 generally)
+        is_pullback = (prev_price > prev_ema and current_price <= current_ema) or \
+                      (abs(current_price - current_ema) / current_ema < 0.005)
+        
+        retracement = (recent_high - current_price) / range_size if range_size > 0 else 0
+        is_healthy_retrace = PULLBACK_RETRACE_PERCENT - 0.1 <= retracement <= PULLBACK_RETRACE_PERCENT + 0.2
+        rsi_ok = PULLBACK_MIN_RSI <= rsi <= PULLBACK_MAX_RSI
+        
+        if is_pullback and is_healthy_retrace and rsi_ok:
+            return True, "PULLBACK_LONG"
+    
+    elif trend_direction == "BEARISH":
+        is_pullback = (prev_price < prev_ema and current_price >= current_ema) or \
+                      (abs(current_price - current_ema) / current_ema < 0.005)
+        
+        retracement = (current_price - recent_low) / range_size if range_size > 0 else 0
+        is_healthy_retrace = PULLBACK_RETRACE_PERCENT - 0.1 <= retracement <= PULLBACK_RETRACE_PERCENT + 0.2
+        rsi_ok = PULLBACK_MIN_RSI <= rsi <= PULLBACK_MAX_RSI
+        
+        if is_pullback and is_healthy_retrace and rsi_ok:
+            return True, "PULLBACK_SHORT"
+    
+    return False, None
+
+def detect_trend(prices: List[Dict]) -> str:
+    """Detect overall trend using last closed candles only"""
+    if len(prices) < 200:
+        return "NEUTRAL"
+    
+    closes = [p['close'] for p in prices]
+    ema50 = calculate_ema_series(closes, 50)
+    ema200 = calculate_ema_series(closes, 200)
+    
+    if len(ema50) < 3 or len(ema200) < 3:
+        return "NEUTRAL"
+    
+    # Use last closed candle (index -2)
+    current_ema50 = ema50[-2]
+    current_ema200 = ema200[-2]
+    
+    if current_ema50 > current_ema200:
+        return "BULLISH"
+    elif current_ema50 < current_ema200:
+        return "BEARISH"
+    
+    return "NEUTRAL"
+
+def calculate_risk_reward(price: float, signal_type: str, risk_pct: float, profit_pct: float) -> Dict:
+    """Calculate levels based on entry price"""
+    if signal_type in ["BULLISH_CROSSOVER", "PULLBACK_LONG"]:
+        entry = price
+        stop_loss = price * (1 - risk_pct / 100)
+        take_profit = price * (1 + profit_pct / 100)
+    else:
+        entry = price
+        stop_loss = price * (1 + risk_pct / 100)
+        take_profit = price * (1 - profit_pct / 100)
+    
+    risk_amount = abs(entry - stop_loss)
+    reward_amount = abs(take_profit - entry)
     ratio = round(reward_amount / risk_amount, 2) if risk_amount > 0 else 0
     
     return {
-        'entry': round(entry, 4), 'stop_loss': round(stop_loss, 4),
-        'take_profit': round(take_profit, 4), 'risk_pct': risk_pct,
-        'profit_pct': profit_pct, 'ratio': ratio
+        'entry': round(entry, 4),
+        'stop_loss': round(stop_loss, 4),
+        'take_profit': round(take_profit, 4),
+        'risk_pct': risk_pct,
+        'profit_pct': profit_pct,
+        'ratio': ratio
     }
 
 def send_telegram_message(message: str, admin: bool = False) -> bool:
@@ -471,7 +598,9 @@ def send_telegram_message(message: str, admin: bool = False) -> bool:
     
     try:
         response = requests.post(url, json={
-            "chat_id": chat_id, "text": message, "parse_mode": "HTML"
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
         }, timeout=10)
         return response.status_code == 200
     except Exception as e:
@@ -479,31 +608,49 @@ def send_telegram_message(message: str, admin: bool = False) -> bool:
         return False
 
 def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
-    """Analyze single asset"""
-    log.info(f"\n{'='*40}\n🔍 Analyzing {asset_name}...")
+    """Analyze single asset using LAST CLOSED CANDLE only"""
+    log.info(f"\n{'='*40}\n🔍 Analyzing {asset_name} (10-min)...")
     
     if not config['api_key']:
         log.warning(f"⚠️ No API key for {asset_name}")
         return None
     
-    prices = fetch_twelvedata_data(config['symbol'], config['api_key'])
+    prices = fetch_twelvedata_data(config['symbol'], config['api_key'], lookback_bars=500)
     if not prices or len(prices) < 200:
         log.warning(f"⚠️ {asset_name}: Only {len(prices) if prices else 0} bars")
         return None
     
-    has_cross, signal_type = check_ema_crossover(prices)
-    if not has_cross:
-        return None
-    
-    current_price = prices[-1]['close']
+    # Use price from last closed candle (index -2)
+    last_closed_price = prices[-2]['close']
     closes = [p['close'] for p in prices]
     
+    # Calculate EMAs using last closed candle
+    ema20_series = calculate_ema_series(closes, PULLBACK_EMA)
     ema50_series = calculate_ema_series(closes, 50)
     ema200_series = calculate_ema_series(closes, 200)
     
-    ema50, ema200 = ema50_series[-1], ema200_series[-1]
-    adx = calculate_adx(prices, 14)
+    # Get values from last closed candle (index -2)
+    ema20 = ema20_series[-2] if len(ema20_series) >= 2 else 0
+    ema50 = ema50_series[-2] if len(ema50_series) >= 2 else 0
+    ema200 = ema200_series[-2] if len(ema200_series) >= 2 else 0
     
+    adx = calculate_adx(prices, 14)
+    overall_trend = detect_trend(prices)
+    
+    # Check for signals using last closed candle
+    has_cross, signal_type = check_ema_crossover(prices)
+    
+    pullback_signal = None
+    if not has_cross and overall_trend != "NEUTRAL":
+        has_pullback, pullback_type = check_pullback_signal(prices, overall_trend)
+        if has_pullback:
+            signal_type = pullback_type
+            has_cross = True
+    
+    if not has_cross:
+        return None
+    
+    # Format ADX text
     if adx > 40:
         adx_text = f"{adx:.1f} 🔥 VERY STRONG"
     elif adx > 25:
@@ -513,18 +660,30 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     else:
         adx_text = f"{adx:.1f} ⚠️ WEAK"
     
-    rr = calculate_risk_reward(current_price, signal_type,
+    rr = calculate_risk_reward(last_closed_price, signal_type,
                                config['risk_percent'], config['profit_percent'])
     
     shares = int(config['position_size'] / rr['entry']) if rr['entry'] > 0 else 0
-    position_value, total_risk = shares * rr['entry'], shares * abs(rr['entry'] - rr['stop_loss'])
+    position_value = shares * rr['entry']
+    total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
     
-    log.info(f"✅ SIGNAL: {signal_type} at ${current_price:.2f}")
+    log.info(f"✅ {signal_type} at ${last_closed_price:.2f} (based on last closed candle)")
+    
     return {
-        'signal_type': signal_type, 'price': current_price, 'ema50': ema50,
-        'ema200': ema200, 'adx': adx_text, 'rr': rr, 'shares': shares,
-        'position_value': position_value, 'total_risk': total_risk,
-        'config': config, 'asset_name': asset_name
+        'signal_type': signal_type,
+        'price': last_closed_price,
+        'ema20': ema20,
+        'ema50': ema50,
+        'ema200': ema200,
+        'adx': adx_text,
+        'rr': rr,
+        'shares': shares,
+        'position_value': position_value,
+        'total_risk': total_risk,
+        'config': config,
+        'asset_name': asset_name,
+        'overall_trend': overall_trend,
+        'candle_time': prices[-2]['timestamp']  # Last closed candle timestamp
     }
 
 def format_signal_message(data: Dict) -> str:
@@ -532,22 +691,57 @@ def format_signal_message(data: Dict) -> str:
     config, rr, asset_name = data['config'], data['rr'], data['asset_name']
     irish_time = get_irish_time()
     
-    arrow = "📈" if data['signal_type'] == "BULLISH" else "📉"
-    direction = "🟢 BULLISH (LONG)" if data['signal_type'] == "BULLISH" else "🔴 BEARISH (SHORT)"
+    signal_type = data['signal_type']
     
-    message = f"""<b>{arrow} {config['display_name']} - {direction} SIGNAL {arrow}</b>
+    # Determine signal display
+    if signal_type == "BULLISH_CROSSOVER":
+        arrow = "📈"
+        direction = "🟢 BULLISH CROSSOVER (LONG)"
+        signal_desc = "EMA200 crossed ABOVE EMA50 on 10-min closed candle"
+    elif signal_type == "BEARISH_CROSSOVER":
+        arrow = "📉"
+        direction = "🔴 BEARISH CROSSOVER (SHORT)"
+        signal_desc = "EMA200 crossed BELOW EMA50 on 10-min closed candle"
+    elif signal_type == "PULLBACK_LONG":
+        arrow = "📈"
+        direction = "🟢 PULLBACK LONG"
+        signal_desc = f"Price pulled back to EMA{PULLBACK_EMA} within uptrend (last closed candle)"
+    elif signal_type == "PULLBACK_SHORT":
+        arrow = "📉"
+        direction = "🔴 PULLBACK SHORT"
+        signal_desc = f"Price pulled back to EMA{PULLBACK_EMA} within downtrend (last closed candle)"
+    else:
+        arrow = "📊"
+        direction = f"📊 {signal_type}"
+        signal_desc = "Signal detected"
+    
+    if "CROSSOVER" in signal_type:
+        strategy_name = "EMA CROSSOVER (EMA200/50) - 10min"
+    else:
+        strategy_name = f"PULLBACK TO EMA{PULLBACK_EMA} - 10min"
+    
+    message = f"""<b>{arrow} {config['display_name']} - {direction} {arrow}</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
-📊 <b>EMA CROSSOVER (15-Min)</b>
+📊 <b>Strategy:</b> {strategy_name}
+⏰ <b>Timeframe:</b> 10-Minute (Last Closed Candle)
 ━━━━━━━━━━━━━━━━━━━━━
+
+<b>Signal Description:</b>
+{signal_desc}
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 <b>EMAs (10-Min)</b>
+━━━━━━━━━━━━━━━━━━━━━
+• EMA20: ${data['ema20']:.2f}
 • EMA50: ${data['ema50']:.2f}
 • EMA200: ${data['ema200']:.2f}
-• <b>EMA200 crossed {data['signal_type'].lower()} EMA50</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
 📈 <b>ADX TREND STRENGTH</b>
 ━━━━━━━━━━━━━━━━━━━━━
 • ADX: {data['adx']}
+• Overall Trend: {data['overall_trend']}
 
 ━━━━━━━━━━━━━━━━━━━━━
 ⚡ <b>RISK MANAGEMENT</b>
@@ -589,85 +783,31 @@ def format_signal_message(data: Dict) -> str:
     
     message += f"""
 ━━━━━━━━━━━━━━━━━━━━━
-💰 <b>Current Price:</b> ${data['price']:.2f}
+💰 <b>Last Closed Candle:</b>
+• Price: ${data['price']:.2f}
+• Time: {data['candle_time']}
+
 ⏰ <b>Irish Time:</b> {irish_time.strftime('%Y-%m-%d %H:%M:%S')}
 
-⚠️ <i>Disclaimer: For educational purposes only.</i>"""
+⚠️ <i>Disclaimer: For educational purposes only.
+Signal based on last closed 10-minute candle (no repainting).</i>"""
     
     return message
 
 def main():
     log.info("=" * 70)
-    log.info("🚀 EMA CROSSOVER TRADING BOT - WITH SMART NOTIFICATIONS")
+    log.info("🚀 EMA CROSSOVER + PULLBACK TRADING BOT - 10-MIN TIMEFRAME")
+    log.info("📊 Strategies: Crossover (EMA200/50) + Pullback to EMA20")
+    log.info("🔒 Signals based on LAST CLOSED CANDLE (no repainting)")
     log.info("=" * 70)
     
     try:
-        # Update health
         update_health('running', 'Bot started successfully')
         
-        # Send daily report at 9 AM (ONCE per day)
         if should_send_daily_report():
             log.info("📊 Sending daily health report...")
             send_daily_report()
         
-        # Send startup message ONLY if there was a failure
         if should_send_startup_message():
             log.info("✅ Sending recovery startup message...")
-            send_startup_message()
-        
-        irish_now = get_irish_time()
-        log.info(f"📊 Monitoring 5 assets | Irish Time: {irish_now.strftime('%Y-%m-%d %H:%M:%S')}")
-        log.info("=" * 70)
-        
-        signals_sent = 0
-        failures = 0
-        
-        for asset_name, config in ASSETS.items():
-            try:
-                if not config['api_key']:
-                    log.info(f"⏭️ {asset_name} - No API key")
-                    continue
-                
-                result = analyze_asset(asset_name, config)
-                
-                if result:
-                    if check_signal_allowed(asset_name, result['signal_type']):
-                        message = format_signal_message(result)
-                        if send_telegram_message(message):
-                            save_signal_time(asset_name, result['signal_type'])
-                            signals_sent += 1
-                            log.info(f"✅ Signal SENT for {asset_name}")
-                        else:
-                            failures += 1
-                    else:
-                        log.info(f"⏭️ {asset_name} - cooldown")
-                else:
-                    log.info(f"📊 {asset_name} - No crossover")
-                
-                time.sleep(2)
-                
-            except Exception as e:
-                failures += 1
-                error_msg = str(e)
-                log.error(f"❌ Error with {asset_name}: {error_msg}")
-                send_failure_alert(asset_name, error_msg)
-        
-        # Update final health
-        if failures == 0:
-            update_health('completed', f"Sent {signals_sent} signals successfully")
-        else:
-            update_health('completed_with_errors', f"Sent {signals_sent} signals, {failures} failures")
-        
-        log.info(f"\n{'='*70}")
-        log.info(f"✅ Scan complete - {signals_sent} signals sent, {failures} failures")
-        log.info(f"🕐 Irish Time: {get_irish_time().strftime('%Y-%m-%d %H:%M:%S')}")
-        log.info(f"{'='*70}\n")
-        
-    except Exception as e:
-        error_msg = str(e)
-        log.error(f"❌ FATAL ERROR: {error_msg}")
-        update_health('failed', error_msg)
-        send_failure_alert("SYSTEM", error_msg)
-
-if __name__ == "__main__":
-    main()
+           
