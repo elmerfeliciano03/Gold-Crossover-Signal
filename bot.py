@@ -5,6 +5,8 @@ With Smart Health Monitoring (Daily Report at 9AM Irish Time)
 Strategies:
 1. EMA Crossover (EMA200 crosses EMA50) - Based on last closed candle
 2. Pullback to EMA20 - Based on last closed candle
+
+Assets: GOLD, SPY, QQQ, EUR/USD, USD/JPY
 """
 
 import os
@@ -25,7 +27,7 @@ TELEGRAM_ADMIN_CHAT_ID = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", TELEGRAM_CHAT_
 
 # Multiple API Keys
 TWELVE_DATA_KEY_MAIN = os.environ.get("TWELVE_DATA_API_KEY")
-TWELVE_DATA_KEY_CRYPTO = os.environ.get("TWELVE_DATA_API_KEY_2")
+TWELVE_DATA_KEY_FOREX = os.environ.get("TWELVE_DATA_API_KEY_2", TWELVE_DATA_KEY_MAIN)
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     log.error("❌ Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
@@ -47,7 +49,7 @@ try:
 except:
     IRISH_TZ = timezone.utc
 
-# Asset configurations
+# Asset configurations (UPDATED: Removed ETH/ADA, added EUR/USD and USD/JPY)
 ASSETS = {
     "GOLD": {
         "symbol": "XAU/USD",
@@ -57,7 +59,8 @@ ASSETS = {
         "position_size": 10000,
         "currency": "EUR",
         "mt5_units": 0.03,
-        "api_key": TWELVE_DATA_KEY_MAIN
+        "api_key": TWELVE_DATA_KEY_MAIN,
+        "point_value": 0.01  # Gold moves in $0.01 increments
     },
     "SPY": {
         "symbol": "SPY",
@@ -67,7 +70,8 @@ ASSETS = {
         "position_size": 2500,
         "currency": "EUR",
         "mt5_units": 0.03,
-        "api_key": TWELVE_DATA_KEY_MAIN
+        "api_key": TWELVE_DATA_KEY_MAIN,
+        "point_value": 0.01
     },
     "QQQ": {
         "symbol": "QQQ",
@@ -77,27 +81,30 @@ ASSETS = {
         "position_size": 2500,
         "currency": "EUR",
         "mt5_units": None,
-        "api_key": TWELVE_DATA_KEY_MAIN
+        "api_key": TWELVE_DATA_KEY_MAIN,
+        "point_value": 0.01
     },
-    "ETH": {
-        "symbol": "ETH/USD",
-        "display_name": "🔷 ETHEREUM",
-        "risk_percent": 1.0,
-        "profit_percent": 2.0,
-        "position_size": 2500,
+    "EURUSD": {
+        "symbol": "EUR/USD",
+        "display_name": "💶 EUR/USD",
+        "risk_percent": 0.5,
+        "profit_percent": 1.0,
+        "position_size": 10000,
         "currency": "EUR",
-        "mt5_units": None,
-        "api_key": TWELVE_DATA_KEY_CRYPTO
+        "mt5_units": 0.03,
+        "api_key": TWELVE_DATA_KEY_FOREX,
+        "point_value": 0.0001  # Forex moves in pips (0.0001)
     },
-    "ADA": {
-        "symbol": "ADA/USD",
-        "display_name": "📊 CARDANO",
-        "risk_percent": 1.0,
-        "profit_percent": 2.0,
-        "position_size": 2500,
+    "USDJPY": {
+        "symbol": "USD/JPY",
+        "display_name": "💴 USD/JPY",
+        "risk_percent": 0.5,
+        "profit_percent": 1.0,
+        "position_size": 10000,
         "currency": "EUR",
-        "mt5_units": None,
-        "api_key": TWELVE_DATA_KEY_CRYPTO
+        "mt5_units": 0.03,
+        "api_key": TWELVE_DATA_KEY_FOREX,
+        "point_value": 0.01  # JPY pairs move in 0.01 (pip = 0.01)
     }
 }
 
@@ -274,7 +281,13 @@ def send_startup_message():
 📊 <b>Last Status:</b> {last_status}
 ⚠️ <b>Last Failure:</b> {last_failure}
 
-📈 <b>Currently Monitoring:</b> 5 assets on 15-min timeframe
+📈 <b>Currently Monitoring (5 assets):</b>
+• 💰 GOLD
+• 📈 SPY
+• 🚀 QQQ
+• 💶 EUR/USD
+• 💴 USD/JPY
+
 ⏰ <b>Schedule:</b> Every 6 minutes
 🛡️ <b>Cooldown:</b> 12 hours between signals
 📊 <b>Signal Logic:</b> Based on LAST CLOSED CANDLE (no repainting)
@@ -313,7 +326,7 @@ def send_failure_alert(asset_name: str, error: str):
     save_tracker(HEALTH_FILE, health)
 
 def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -> Optional[List[Dict]]:
-    """Fetch 15-minute data from Twelve Data API (supported interval)"""
+    """Fetch 15-minute data from Twelve Data API"""
     if not api_key:
         return None
         
@@ -321,7 +334,7 @@ def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -
         url = f"https://api.twelvedata.com/time_series"
         params = {
             'symbol': symbol,
-            'interval': '15min',  # Changed from 10min to 15min (supported)
+            'interval': '15min',
             'outputsize': str(lookback_bars),
             'apikey': api_key
         }
@@ -535,9 +548,9 @@ def calculate_risk_reward(price: float, signal_type: str, risk_pct: float, profi
     ratio = round(reward_amount / risk_amount, 2) if risk_amount > 0 else 0
     
     return {
-        'entry': round(entry, 4),
-        'stop_loss': round(stop_loss, 4),
-        'take_profit': round(take_profit, 4),
+        'entry': round(entry, 5) if price < 10 else round(entry, 3),
+        'stop_loss': round(stop_loss, 5) if price < 10 else round(stop_loss, 3),
+        'take_profit': round(take_profit, 5) if price < 10 else round(take_profit, 3),
         'risk_pct': risk_pct,
         'profit_pct': profit_pct,
         'ratio': ratio
@@ -611,7 +624,7 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     position_value = shares * rr['entry']
     total_risk = shares * abs(rr['entry'] - rr['stop_loss'])
     
-    log.info(f"✅ {signal_type} at ${last_closed_price:.2f}")
+    log.info(f"✅ {signal_type} at {rr['entry']:.5f if last_closed_price < 10 else rr['entry']:.3f}")
     
     return {
         'signal_type': signal_type,
@@ -634,6 +647,19 @@ def format_signal_message(data: Dict) -> str:
     config, rr = data['config'], data['rr']
     irish_time = get_irish_time()
     signal_type = data['signal_type']
+    price = data['price']
+    
+    # Format price based on value (forex needs more decimals)
+    if price < 10:
+        price_str = f"{price:.5f}"
+        ema20_str = f"{data['ema20']:.5f}"
+        ema50_str = f"{data['ema50']:.5f}"
+        ema200_str = f"{data['ema200']:.5f}"
+    else:
+        price_str = f"{price:.2f}"
+        ema20_str = f"{data['ema20']:.2f}"
+        ema50_str = f"{data['ema50']:.2f}"
+        ema200_str = f"{data['ema200']:.2f}"
     
     if signal_type == "BULLISH_CROSSOVER":
         arrow = "📈"
@@ -664,9 +690,9 @@ def format_signal_message(data: Dict) -> str:
 ━━━━━━━━━━━━━━━━━━━━━
 
 📊 <b>EMAs (15-Min)</b>
-• EMA20: ${data['ema20']:.2f}
-• EMA50: ${data['ema50']:.2f}
-• EMA200: ${data['ema200']:.2f}
+• EMA20: {ema20_str}
+• EMA50: {ema50_str}
+• EMA200: {ema200_str}
 
 📈 <b>ADX:</b> {data['adx']}
 📈 <b>Trend:</b> {data['overall_trend']}
@@ -678,26 +704,26 @@ def format_signal_message(data: Dict) -> str:
 • Risk:Reward: 1:{rr['ratio']}
 
 📍 <b>Levels:</b>
-• Entry: ${rr['entry']}
-• Stop Loss: ${rr['stop_loss']}
-• Take Profit: ${rr['take_profit']}
+• Entry: {rr['entry']}
+• Stop Loss: {rr['stop_loss']}
+• Take Profit: {rr['take_profit']}
 
 ━━━━━━━━━━━━━━━━━━━━━
 💼 <b>POSITION SIZING</b>
 ━━━━━━━━━━━━━━━━━━━━━
 • Capital: ${config['position_size']:,}
-• Shares: {data['shares']:,} units
+• Units: {data['shares']:,} units
 • Position Value: ${data['position_value']:,.2f}
 • Total Risk: ${data['total_risk']:,.2f}
 """
     
     if config.get('mt5_units') and data['asset_name'] in ['GOLD', 'SPY']:
         if data['asset_name'] == 'GOLD':
-            risk_pips = abs(rr['entry'] - rr['stop_loss']) / 0.01
+            risk_pips = abs(rr['entry'] - rr['stop_loss']) / config['point_value']
             message += f"""
 💹 <b>MT5:</b>
 • Units: {config['mt5_units']}
-• Risk: {risk_pips:.1f} pips
+• Risk: {risk_pips:.1f} points
 """
         else:
             message += f"""
@@ -708,7 +734,7 @@ def format_signal_message(data: Dict) -> str:
     message += f"""
 ━━━━━━━━━━━━━━━━━━━━━
 💰 <b>Last Closed Candle:</b>
-• Price: ${data['price']:.2f}
+• Price: {price_str}
 • Time: {data['candle_time']}
 
 ⏰ <b>Irish Time:</b> {irish_time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -720,6 +746,7 @@ def format_signal_message(data: Dict) -> str:
 def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER + PULLBACK BOT - 15-MIN TIMEFRAME")
+    log.info("📊 Monitoring: GOLD, SPY, QQQ, EUR/USD, USD/JPY")
     log.info("📊 Based on LAST CLOSED CANDLE (no repainting)")
     log.info("=" * 70)
     
