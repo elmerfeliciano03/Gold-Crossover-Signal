@@ -1,5 +1,5 @@
 """
-EMA Crossover + Pullback Trading Bot - 10-Minute Timeframe
+EMA Crossover + Pullback Trading Bot - 15-Minute Timeframe
 With Smart Health Monitoring (Daily Report at 9AM Irish Time)
 
 Strategies:
@@ -255,7 +255,7 @@ def send_daily_report():
 
 🕐 <b>Next Report:</b> Tomorrow at 9:00 AM Irish Time
 
-<i>🤖 Automated health report - Bot is monitoring 5 assets on 10-min timeframe</i>"""
+<i>🤖 Automated health report - Bot is monitoring 5 assets on 15-min timeframe</i>"""
     
     send_telegram_message(message, admin=True)
     health['last_daily_report'] = datetime.now(timezone.utc).isoformat()
@@ -274,7 +274,7 @@ def send_startup_message():
 📊 <b>Last Status:</b> {last_status}
 ⚠️ <b>Last Failure:</b> {last_failure}
 
-📈 <b>Currently Monitoring:</b> 5 assets on 10-min timeframe
+📈 <b>Currently Monitoring:</b> 5 assets on 15-min timeframe
 ⏰ <b>Schedule:</b> Every 6 minutes
 🛡️ <b>Cooldown:</b> 12 hours between signals
 📊 <b>Signal Logic:</b> Based on LAST CLOSED CANDLE (no repainting)
@@ -313,6 +313,7 @@ def send_failure_alert(asset_name: str, error: str):
     save_tracker(HEALTH_FILE, health)
 
 def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -> Optional[List[Dict]]:
+    """Fetch 15-minute data from Twelve Data API (supported interval)"""
     if not api_key:
         return None
         
@@ -320,12 +321,12 @@ def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -
         url = f"https://api.twelvedata.com/time_series"
         params = {
             'symbol': symbol,
-            'interval': '10min',
+            'interval': '15min',  # Changed from 10min to 15min (supported)
             'outputsize': str(lookback_bars),
             'apikey': api_key
         }
         
-        log.info(f"Fetching {symbol} (10-min)...")
+        log.info(f"Fetching {symbol} (15-min timeframe)...")
         response = requests.get(url, params=params, timeout=15)
         data = response.json()
         
@@ -558,7 +559,7 @@ def send_telegram_message(message: str, admin: bool = False) -> bool:
         return False
 
 def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
-    log.info(f"\n{'='*40}\n🔍 Analyzing {asset_name} (10-min)...")
+    log.info(f"\n{'='*40}\n🔍 Analyzing {asset_name} (15-min)...")
     
     if not config['api_key']:
         log.warning(f"⚠️ No API key for {asset_name}")
@@ -658,11 +659,11 @@ def format_signal_message(data: Dict) -> str:
     message = f"""<b>{arrow} {config['display_name']} - {direction} {arrow}</b>
 
 ━━━━━━━━━━━━━━━━━━━━━
-⏰ <b>Timeframe:</b> 10-Minute (Last Closed Candle)
+⏰ <b>Timeframe:</b> 15-Minute (Last Closed Candle)
 📊 <b>Signal:</b> {signal_desc}
 ━━━━━━━━━━━━━━━━━━━━━
 
-📊 <b>EMAs (10-Min)</b>
+📊 <b>EMAs (15-Min)</b>
 • EMA20: ${data['ema20']:.2f}
 • EMA50: ${data['ema50']:.2f}
 • EMA200: ${data['ema200']:.2f}
@@ -712,13 +713,13 @@ def format_signal_message(data: Dict) -> str:
 
 ⏰ <b>Irish Time:</b> {irish_time.strftime('%Y-%m-%d %H:%M:%S')}
 
-⚠️ <i>Educational purposes only. Based on last closed 10-min candle.</i>"""
+⚠️ <i>Educational purposes only. Based on last closed 15-min candle.</i>"""
     
     return message
 
 def main():
     log.info("=" * 70)
-    log.info("🚀 EMA CROSSOVER + PULLBACK BOT - 10-MIN TIMEFRAME")
+    log.info("🚀 EMA CROSSOVER + PULLBACK BOT - 15-MIN TIMEFRAME")
     log.info("📊 Based on LAST CLOSED CANDLE (no repainting)")
     log.info("=" * 70)
     
