@@ -4,9 +4,9 @@ With Smart Health Monitoring (Daily Report at 9AM Irish Time)
 
 Strategies:
 1. EMA Crossover (EMA200 crosses EMA50) - Based on last closed candle
-2. Pullback to EMA20 - Based on last closed candle
+2. Pullback to EMA50 (with 4H + 1H trend confirmation)
 
-Assets: GOLD, SPY, QQQ, EUR/USD, USD/JPY, GBP/USD
+Assets: GOLD, SILVER, EUR/USD, USD/JPY, GBP/USD
 """
 
 import os
@@ -34,7 +34,7 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     exit(1)
 
 if not TWELVE_DATA_KEY_MAIN:
-    log.error("❌ Missing TWELVE_DATA_API_KEY (for GOLD, SPY, QQQ)")
+    log.error("❌ Missing TWELVE_DATA_API_KEY (for GOLD, SILVER)")
     exit(1)
 
 # Cooldown files
@@ -62,23 +62,12 @@ ASSETS = {
         "api_key": TWELVE_DATA_KEY_MAIN,
         "point_value": 0.01
     },
-    "SPY": {
-        "symbol": "SPY",
-        "display_name": "📈 SPY",
-        "risk_percent": 2.0,
-        "profit_percent": 4.0,
-        "position_size": 2500,
-        "currency": "EUR",
-        "mt5_units": 0.03,
-        "api_key": TWELVE_DATA_KEY_MAIN,
-        "point_value": 0.01
-    },
-    "QQQ": {
-        "symbol": "QQQ",
-        "display_name": "🚀 QQQ",
-        "risk_percent": 1.0,
-        "profit_percent": 2.0,
-        "position_size": 2500,
+    "SILVER": {
+        "symbol": "XAG/USD",
+        "display_name": "🔘 SILVER",
+        "risk_percent": 0.5,
+        "profit_percent": 1.0,
+        "position_size": 10000,
         "currency": "EUR",
         "mt5_units": None,
         "api_key": TWELVE_DATA_KEY_MAIN,
@@ -119,11 +108,15 @@ ASSETS = {
     }
 }
 
-# Pullback configuration
-PULLBACK_EMA = 20
+# Pullback configuration (UPDATED: Using EMA50 instead of EMA20)
+PULLBACK_EMA = 50  # Changed from 20 to 50
 PULLBACK_RETRACE_PERCENT = 0.382
 PULLBACK_MIN_RSI = 40
 PULLBACK_MAX_RSI = 60
+
+# Higher timeframe configuration for trend confirmation
+HIGHER_TF_1H = "1h"
+HIGHER_TF_4H = "4h"
 
 def get_irish_time():
     return datetime.now(IRISH_TZ)
@@ -273,7 +266,7 @@ def send_daily_report():
 
 🕐 <b>Next Report:</b> Tomorrow at 9:00 AM Irish Time
 
-<i>🤖 Automated health report - Bot is monitoring 6 assets on 15-min timeframe</i>"""
+<i>🤖 Automated health report - Bot is monitoring 5 assets on 15-min timeframe</i>"""
     
     send_telegram_message(message, admin=True)
     health['last_daily_report'] = datetime.now(timezone.utc).isoformat()
@@ -292,17 +285,18 @@ def send_startup_message():
 📊 <b>Last Status:</b> {last_status}
 ⚠️ <b>Last Failure:</b> {last_failure}
 
-📈 <b>Currently Monitoring (6 assets):</b>
+📈 <b>Currently Monitoring (5 assets):</b>
 • 💰 GOLD
-• 📈 SPY
-• 🚀 QQQ
+• 🔘 SILVER
 • 💶 EUR/USD
 • 💴 USD/JPY
 • 💷 GBP/USD
 
 ⏰ <b>Schedule:</b> Every 6 minutes
 🛡️ <b>Cooldown:</b> 12 hours between signals
-📊 <b>Signal Logic:</b> Based on LAST CLOSED CANDLE (no repainting)
+📊 <b>Signal Logic:</b> 
+   • Pullback to EMA50 on 15-min
+   • Trend confirmation: 4H + 1H charts
 
 <i>Bot is back online and monitoring for signals</i>"""
     
@@ -337,8 +331,8 @@ def send_failure_alert(asset_name: str, error: str):
     health['last_failure_alert'] = datetime.now(timezone.utc).isoformat()
     save_tracker(HEALTH_FILE, health)
 
-def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -> Optional[List[Dict]]:
-    """Fetch 15-minute data from Twelve Data API"""
+def fetch_twelvedata_data(symbol: str, api_key: str, interval: str = "15min", lookback_bars: int = 500) -> Optional[List[Dict]]:
+    """Fetch data from Twelve Data API with specified interval"""
     if not api_key:
         return None
         
@@ -346,12 +340,12 @@ def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -
         url = f"https://api.twelvedata.com/time_series"
         params = {
             'symbol': symbol,
-            'interval': '15min',
+            'interval': interval,
             'outputsize': str(lookback_bars),
             'apikey': api_key
         }
         
-        log.info(f"Fetching {symbol} (15-min timeframe)...")
+        log.info(f"Fetching {symbol} ({interval} timeframe)...")
         response = requests.get(url, params=params, timeout=15)
         data = response.json()
         
@@ -375,7 +369,7 @@ def fetch_twelvedata_data(symbol: str, api_key: str, lookback_bars: int = 500) -
             })
         
         prices.reverse()
-        log.info(f"✅ Got {len(prices)} bars for {symbol}")
+        log.info(f"✅ Got {len(prices)} bars for {symbol} ({interval})")
         return prices
         
     except Exception as e:
@@ -452,7 +446,110 @@ def calculate_adx(prices: List[Dict], period: int = 14) -> float:
     
     return 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
 
+def get_higher_tf_trend(symbol: str, api_key: str) -> Tuple[str, str]:
+    """
+    Get trend direction from 4H and 1H timeframes using EMA200
+    Returns: (trend_4h, trend_1h)
+    """
+    try:
+        # Fetch 4H data (using 1H and resampling since 4H not directly available)
+        df_1h = fetch_twelvedata_data(symbol, api_key, "1h", 200)
+        if df_1h and len(df_1h) >= 100:
+            # Resample 1H to 4H
+            closes_1h = [p['close'] for p in df_1h]
+            # Take every 4th candle for 4H approximation
+            closes_4h = closes_1h[::4]
+            if len(closes_4h) >= 50:
+                ema200_4h = calculate_ema_series(closes_4h, min(200, len(closes_4h) - 1))
+                if ema200_4h:
+                    current_price_4h = closes_4h[-2] if len(closes_4h) >= 2 else closes_4h[-1]
+                    current_ema_4h = ema200_4h[-2] if len(ema200_4h) >= 2 else ema200_4h[-1]
+                    trend_4h = "BULLISH" if current_price_4h > current_ema_4h else "BEARISH"
+                else:
+                    trend_4h = "NEUTRAL"
+            else:
+                trend_4h = "NEUTRAL"
+        else:
+            trend_4h = "NEUTRAL"
+        
+        # Fetch 1H data
+        df_1h = fetch_twelvedata_data(symbol, api_key, "1h", 300)
+        if df_1h and len(df_1h) >= 200:
+            closes_1h = [p['close'] for p in df_1h]
+            ema200_1h = calculate_ema_series(closes_1h, min(200, len(closes_1h) - 1))
+            if ema200_1h:
+                current_price_1h = closes_1h[-2] if len(closes_1h) >= 2 else closes_1h[-1]
+                current_ema_1h = ema200_1h[-2] if len(ema200_1h) >= 2 else ema200_1h[-1]
+                trend_1h = "BULLISH" if current_price_1h > current_ema_1h else "BEARISH"
+            else:
+                trend_1h = "NEUTRAL"
+        else:
+            trend_1h = "NEUTRAL"
+        
+        return trend_4h, trend_1h
+        
+    except Exception as e:
+        log.error(f"Error getting higher TF trend: {e}")
+        return "NEUTRAL", "NEUTRAL"
+
+def check_pullback_signal(prices: List[Dict], trend_4h: str, trend_1h: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check for pullback entry to EMA50 with higher timeframe confirmation
+    LONG: 4H BULLISH + 1H BULLISH + pullback to EMA50
+    SHORT: 4H BEARISH + 1H BEARISH + pullback to EMA50
+    """
+    if len(prices) < 60:
+        return False, None
+    
+    closes = [p['close'] for p in prices]
+    highs = [p['high'] for p in prices]
+    lows = [p['low'] for p in prices]
+    
+    # Calculate EMA50 on 15-min chart
+    ema50 = calculate_ema_series(closes, PULLBACK_EMA)
+    
+    if len(ema50) < 10:
+        return False, None
+    
+    # Use LAST CLOSED CANDLE (index -2) to avoid repainting
+    current_price = closes[-2]
+    current_ema = ema50[-2]
+    prev_price = closes[-3]
+    prev_ema = ema50[-3]
+    
+    rsi = calculate_rsi(closes, 14)
+    
+    # Calculate recent swing high/low for retracement depth
+    recent_high = max(highs[-21:-1])
+    recent_low = min(lows[-21:-1])
+    range_size = recent_high - recent_low
+    
+    # Determine if price is pulling back to EMA50
+    # Pullback occurs when price moves from above EMA to at/near EMA
+    is_pullback = (prev_price > prev_ema and current_price <= current_ema) or \
+                  (abs(current_price - current_ema) / current_ema < 0.003)  # Within 0.3% of EMA
+    
+    # Calculate retracement depth (Fibonacci style)
+    retracement = (recent_high - current_price) / range_size if range_size > 0 else 0
+    is_healthy_retrace = PULLBACK_RETRACE_PERCENT - 0.1 <= retracement <= PULLBACK_RETRACE_PERCENT + 0.2
+    rsi_ok = PULLBACK_MIN_RSI <= rsi <= PULLBACK_MAX_RSI
+    
+    # LONG signal: 4H BULLISH + 1H BULLISH + pullback to EMA50
+    if trend_4h == "BULLISH" and trend_1h == "BULLISH":
+        if is_pullback and is_healthy_retrace and rsi_ok:
+            log.info(f"✅ LONG pullback signal confirmed by 4H ({trend_4h}) + 1H ({trend_1h})")
+            return True, "PULLBACK_LONG"
+    
+    # SHORT signal: 4H BEARISH + 1H BEARISH + pullback to EMA50
+    elif trend_4h == "BEARISH" and trend_1h == "BEARISH":
+        if is_pullback and is_healthy_retrace and rsi_ok:
+            log.info(f"✅ SHORT pullback signal confirmed by 4H ({trend_4h}) + 1H ({trend_1h})")
+            return True, "PULLBACK_SHORT"
+    
+    return False, None
+
 def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
+    """Check for EMA200 crossing EMA50 (classic crossover strategy)"""
     if len(prices) < 200:
         return False, None
     
@@ -475,75 +572,6 @@ def check_ema_crossover(prices: List[Dict]) -> Tuple[bool, Optional[str]]:
         return True, "BEARISH_CROSSOVER"
     
     return False, None
-
-def check_pullback_signal(prices: List[Dict], trend_direction: str) -> Tuple[bool, Optional[str]]:
-    if len(prices) < 50:
-        return False, None
-    
-    closes = [p['close'] for p in prices]
-    highs = [p['high'] for p in prices]
-    lows = [p['low'] for p in prices]
-    
-    ema20 = calculate_ema_series(closes, PULLBACK_EMA)
-    
-    if len(ema20) < 10:
-        return False, None
-    
-    # Use LAST CLOSED CANDLE (index -2)
-    current_price = closes[-2]
-    current_ema = ema20[-2]
-    prev_price = closes[-3]
-    prev_ema = ema20[-3]
-    
-    rsi = calculate_rsi(closes, 14)
-    recent_high = max(highs[-21:-1])
-    recent_low = min(lows[-21:-1])
-    range_size = recent_high - recent_low
-    
-    if trend_direction == "BULLISH":
-        is_pullback = (prev_price > prev_ema and current_price <= current_ema) or \
-                      (abs(current_price - current_ema) / current_ema < 0.005)
-        
-        retracement = (recent_high - current_price) / range_size if range_size > 0 else 0
-        is_healthy_retrace = PULLBACK_RETRACE_PERCENT - 0.1 <= retracement <= PULLBACK_RETRACE_PERCENT + 0.2
-        rsi_ok = PULLBACK_MIN_RSI <= rsi <= PULLBACK_MAX_RSI
-        
-        if is_pullback and is_healthy_retrace and rsi_ok:
-            return True, "PULLBACK_LONG"
-    
-    elif trend_direction == "BEARISH":
-        is_pullback = (prev_price < prev_ema and current_price >= current_ema) or \
-                      (abs(current_price - current_ema) / current_ema < 0.005)
-        
-        retracement = (current_price - recent_low) / range_size if range_size > 0 else 0
-        is_healthy_retrace = PULLBACK_RETRACE_PERCENT - 0.1 <= retracement <= PULLBACK_RETRACE_PERCENT + 0.2
-        rsi_ok = PULLBACK_MIN_RSI <= rsi <= PULLBACK_MAX_RSI
-        
-        if is_pullback and is_healthy_retrace and rsi_ok:
-            return True, "PULLBACK_SHORT"
-    
-    return False, None
-
-def detect_trend(prices: List[Dict]) -> str:
-    if len(prices) < 200:
-        return "NEUTRAL"
-    
-    closes = [p['close'] for p in prices]
-    ema50 = calculate_ema_series(closes, 50)
-    ema200 = calculate_ema_series(closes, 200)
-    
-    if len(ema50) < 3 or len(ema200) < 3:
-        return "NEUTRAL"
-    
-    current_ema50 = ema50[-2]
-    current_ema200 = ema200[-2]
-    
-    if current_ema50 > current_ema200:
-        return "BULLISH"
-    elif current_ema50 < current_ema200:
-        return "BEARISH"
-    
-    return "NEUTRAL"
 
 def calculate_risk_reward(price: float, signal_type: str, risk_pct: float, profit_pct: float) -> Dict:
     if signal_type in ["BULLISH_CROSSOVER", "PULLBACK_LONG"]:
@@ -590,29 +618,34 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
         log.warning(f"⚠️ No API key for {asset_name}")
         return None
     
-    prices = fetch_twelvedata_data(config['symbol'], config['api_key'], lookback_bars=500)
-    if not prices or len(prices) < 200:
-        log.warning(f"⚠️ {asset_name}: Only {len(prices) if prices else 0} bars")
+    # Fetch 15-min data for pullback detection
+    prices_15min = fetch_twelvedata_data(config['symbol'], config['api_key'], "15min", 300)
+    if not prices_15min or len(prices_15min) < 100:
+        log.warning(f"⚠️ {asset_name}: Only {len(prices_15min) if prices_15min else 0} bars")
         return None
     
-    last_closed_price = prices[-2]['close']
-    closes = [p['close'] for p in prices]
+    # Get higher timeframe trends (4H and 1H)
+    trend_4h, trend_1h = get_higher_tf_trend(config['symbol'], config['api_key'])
+    log.info(f"📈 {asset_name} Higher TF Trends - 4H: {trend_4h}, 1H: {trend_1h}")
     
-    ema20_series = calculate_ema_series(closes, PULLBACK_EMA)
-    ema50_series = calculate_ema_series(closes, 50)
+    last_closed_price = prices_15min[-2]['close']
+    closes = [p['close'] for p in prices_15min]
+    
+    ema50_series = calculate_ema_series(closes, PULLBACK_EMA)
     ema200_series = calculate_ema_series(closes, 200)
     
-    ema20 = ema20_series[-2] if len(ema20_series) >= 2 else 0
     ema50 = ema50_series[-2] if len(ema50_series) >= 2 else 0
     ema200 = ema200_series[-2] if len(ema200_series) >= 2 else 0
     
-    adx = calculate_adx(prices, 14)
-    overall_trend = detect_trend(prices)
+    adx = calculate_adx(prices_15min, 14)
     
-    has_cross, signal_type = check_ema_crossover(prices)
+    # Strategy 1: EMA Crossover (classic)
+    has_cross, signal_type = check_ema_crossover(prices_15min)
     
-    if not has_cross and overall_trend != "NEUTRAL":
-        has_pullback, pullback_type = check_pullback_signal(prices, overall_trend)
+    # Strategy 2: Pullback to EMA50 (with higher TF confirmation)
+    pullback_signal = None
+    if not has_cross:
+        has_pullback, pullback_type = check_pullback_signal(prices_15min, trend_4h, trend_1h)
         if has_pullback:
             signal_type = pullback_type
             has_cross = True
@@ -641,7 +674,6 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
     return {
         'signal_type': signal_type,
         'price': last_closed_price,
-        'ema20': ema20,
         'ema50': ema50,
         'ema200': ema200,
         'adx': adx_text,
@@ -651,8 +683,9 @@ def analyze_asset(asset_name: str, config: Dict) -> Optional[Dict]:
         'total_risk': total_risk,
         'config': config,
         'asset_name': asset_name,
-        'overall_trend': overall_trend,
-        'candle_time': prices[-2]['timestamp']
+        'trend_4h': trend_4h,
+        'trend_1h': trend_1h,
+        'candle_time': prices_15min[-2]['timestamp']
     }
 
 def format_signal_message(data: Dict) -> str:
@@ -661,15 +694,13 @@ def format_signal_message(data: Dict) -> str:
     signal_type = data['signal_type']
     price = data['price']
     
-    # Format price based on value (forex needs more decimals)
+    # Format price based on value
     if price < 10:
         price_str = f"{price:.5f}"
-        ema20_str = f"{data['ema20']:.5f}"
         ema50_str = f"{data['ema50']:.5f}"
         ema200_str = f"{data['ema200']:.5f}"
     else:
         price_str = f"{price:.2f}"
-        ema20_str = f"{data['ema20']:.2f}"
         ema50_str = f"{data['ema50']:.2f}"
         ema200_str = f"{data['ema200']:.2f}"
     
@@ -684,11 +715,11 @@ def format_signal_message(data: Dict) -> str:
     elif signal_type == "PULLBACK_LONG":
         arrow = "📈"
         direction = "🟢 PULLBACK LONG"
-        signal_desc = f"Price pulled back to EMA{PULLBACK_EMA} within uptrend"
+        signal_desc = f"Price pulled back to EMA50 within uptrend (4H: {data['trend_4h']}, 1H: {data['trend_1h']})"
     elif signal_type == "PULLBACK_SHORT":
         arrow = "📉"
         direction = "🔴 PULLBACK SHORT"
-        signal_desc = f"Price pulled back to EMA{PULLBACK_EMA} within downtrend"
+        signal_desc = f"Price pulled back to EMA50 within downtrend (4H: {data['trend_4h']}, 1H: {data['trend_1h']})"
     else:
         arrow = "📊"
         direction = f"📊 {signal_type}"
@@ -702,12 +733,11 @@ def format_signal_message(data: Dict) -> str:
 ━━━━━━━━━━━━━━━━━━━━━
 
 📊 <b>EMAs (15-Min)</b>
-• EMA20: {ema20_str}
 • EMA50: {ema50_str}
 • EMA200: {ema200_str}
 
 📈 <b>ADX:</b> {data['adx']}
-📈 <b>Trend:</b> {data['overall_trend']}
+📈 <b>Higher TF Trend:</b> 4H: {data['trend_4h']} | 1H: {data['trend_1h']}
 
 ━━━━━━━━━━━━━━━━━━━━━
 ⚡ <b>RISK MANAGEMENT</b>
@@ -729,7 +759,7 @@ def format_signal_message(data: Dict) -> str:
 • Total Risk: ${data['total_risk']:,.2f}
 """
     
-    if config.get('mt5_units') and data['asset_name'] in ['GOLD', 'SPY']:
+    if config.get('mt5_units') and data['asset_name'] in ['GOLD', 'SILVER']:
         if data['asset_name'] == 'GOLD':
             risk_pips = abs(rr['entry'] - rr['stop_loss']) / config['point_value']
             message += f"""
@@ -737,10 +767,12 @@ def format_signal_message(data: Dict) -> str:
 • Units: {config['mt5_units']}
 • Risk: {risk_pips:.1f} points
 """
-        else:
+        elif data['asset_name'] == 'SILVER':
+            risk_pips = abs(rr['entry'] - rr['stop_loss']) / config['point_value']
             message += f"""
 💹 <b>MT5:</b>
-• Units: {config['mt5_units']}
+• Units: 0.5 (standard lot)
+• Risk: {risk_pips:.1f} points
 """
     
     message += f"""
@@ -758,7 +790,8 @@ def format_signal_message(data: Dict) -> str:
 def main():
     log.info("=" * 70)
     log.info("🚀 EMA CROSSOVER + PULLBACK BOT - 15-MIN TIMEFRAME")
-    log.info("📊 Monitoring: GOLD, SPY, QQQ, EUR/USD, USD/JPY, GBP/USD")
+    log.info("📊 Monitoring: GOLD, SILVER, EUR/USD, USD/JPY, GBP/USD")
+    log.info("📊 Pullback Strategy: EMA50 with 4H + 1H trend confirmation")
     log.info("📊 Based on LAST CLOSED CANDLE (no repainting)")
     log.info("=" * 70)
     
