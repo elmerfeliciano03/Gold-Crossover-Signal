@@ -68,7 +68,7 @@ PAIRS = {
 EMA_FAST             = 50
 EMA_SLOW             = 200
 ADX_MIN              = 20
-SIGNAL_COOLDOWN_HRS  = 12        # hours between same signal type on same pair
+SIGNAL_COOLDOWN_HRS  = 1         # hours between same signal type on same pair
 CANDLE_CONFIRM       = True
 VOLUME_FILTER        = True
 BREAKEVEN_TRIGGER    = 0.5       # % move before SL moves to breakeven
@@ -660,12 +660,12 @@ def scan_pair(pair: str, symbol: str, api_key: str, risk_pct: float) -> int:
     if len(df) < EMA_SLOW + PULLBACK_SWING_BARS + 20:
         log.warning(f"  Not enough bars ({len(df)}), skipping.")
         return 0
-    time.sleep(2)
+    time.sleep(8)   # free plan: 8 calls/min — spread calls ~8s apart
 
     df_1h = fetch_1h(symbol, api_key, outputsize=300)
     trend_4h, trend_1h = htf_trend(df_1h)
     log.info(f"  HTF: 4H={trend_4h}, 1H={trend_1h}")
-    time.sleep(2)
+    time.sleep(8)   # free plan: breathing room before next pair
 
     # ── Detect all signals ────────────────────────────────────────────────────
     signals_df = detect_signals(df, trend_4h, trend_1h)
@@ -733,7 +733,7 @@ def main() -> None:
             log.error(f"  ❌ {pair}: {e}", exc_info=True)
             send_error_alert(pair, str(e))
             update_health("error", str(e))
-        time.sleep(3)
+        time.sleep(5)   # small gap between pairs
 
     status = "ok" if errors == 0 else "partial_error"
     update_health(status, f"sent={total_sent} errors={errors}")
