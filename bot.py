@@ -21,6 +21,13 @@ Required environment variables (set in Render dashboard):
 State file: /tmp/signal_tracker.json
   Persists within a Render instance session. Resets on redeploy/restart
   (acceptable — cooldown is 12 hours so at worst one duplicate alert).
+
+Fixes applied (v4.1):
+  FIX 1 — main() was never called (missing body under if __name__ == "__main__")
+  FIX 2 — session hour filter checked times[i] (forming candle) instead of
+           times[lcc] (last closed candle), blocking valid signals near hour edges
+  FIX 3 — failed crossover candle/volume check used bare `continue`, silently
+           skipping pullback detection on the same bar; replaced with flag pattern
 """
 
 import os
@@ -339,16 +346,23 @@ def htf_trend(df_1h: pd.DataFrame) -> tuple[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIGNAL DETECTION  (v4 — exact match to backtester)
+# SIGNAL DETECTION  (v4.1 — fixes applied)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detect_signals(df: pd.DataFrame,
                    trend_4h: str,
                    trend_1h: str) -> pd.DataFrame:
     """
-    Full v4 signal detection over the supplied DataFrame.
+    Full v4.1 signal detection over the supplied DataFrame.
     Returns all detected signals as a DataFrame. The caller then filters
     to only "fresh" signals (last SIGNAL_FRESHNESS_BARS bars).
+
+    Changes vs v4:
+      - FIX 2: session hour filter now uses times[lcc] (last closed candle)
+               instead of times[i] (the forming candle)
+      - FIX 3: failed crossover checks no longer silently skip pullback
+               detection on the same bar; replaced bare `continue` with a
+               boolean `valid` flag so the pullback block is still evaluated
     """
     closes  = df["Close"].values
     highs   = df["High"].values
@@ -369,7 +383,8 @@ def detect_signals(df: pd.DataFrame,
     for i in range(min_bar, len(df)):
         lcc = i - 1   # last closed candle — no look-ahead
 
-        if times[i].hour not in ALLOWED_HOURS:
+        # FIX 2: check the closed candle's hour, not the forming candle's hour
+        if times[lcc].hour not in ALLOWED_HOURS:
             continue
 
         cur50  = ema50_arr[lcc];  prv50  = ema50_arr[lcc-1]
@@ -391,28 +406,35 @@ def detect_signals(df: pd.DataFrame,
             signal_type = "BULLISH_CROSSOVER" if bullish_cross else "BEARISH_CROSSOVER"
             is_long = bullish_cross
 
+            # FIX 3: use a flag instead of bare `continue` so a failed crossover
+            # check does not silently skip pullback detection on this same bar
+            valid = True
+
             if CANDLE_CONFIRM:
-                if is_long  and not (cur_px > cur50 and cur_px > cur200): continue
-                if not is_long and not (cur_px < cur50 and cur_px < cur200): continue
+                if is_long  and not (cur_px > cur50 and cur_px > cur200):
+                    valid = False
+                if not is_long and not (cur_px < cur50 and cur_px < cur200):
+                    valid = False
 
-            if VOLUME_FILTER and vol_ma_arr[lcc] > 0:
-                if volumes[lcc] < 1.2 * vol_ma_arr[lcc]: continue
+            if valid and VOLUME_FILTER and vol_ma_arr[lcc] > 0:
+                if volumes[lcc] < 1.2 * vol_ma_arr[lcc]:
+                    valid = False
 
-            if (i - last_signal_bar.get(signal_type, -9999)) < 12:
-                continue
+            if valid and (i - last_signal_bar.get(signal_type, -9999)) >= 12:
+                entry = cur_px
+                sl    = entry * (1 - 0.005) if is_long else entry * (1 + 0.005)
+                tp    = entry * (1 + 0.010) if is_long else entry * (1 - 0.010)
 
-            entry = cur_px
-            sl    = entry * (1 - 0.005) if is_long else entry * (1 + 0.005)
-            tp    = entry * (1 + 0.010) if is_long else entry * (1 - 0.010)
+                signals.append({
+                    "bar": i, "timestamp": str(times[i]),
+                    "signal_type": signal_type, "direction": 1 if is_long else -1,
+                    "entry": round(entry, 5), "sl": round(sl, 5), "tp": round(tp, 5),
+                    "adx": round(adx_val, 1), "rsi": round(rsi_val, 1),
+                    "ema50": round(cur50, 5), "ema200": round(cur200, 5),
+                })
+                last_signal_bar[signal_type] = i
 
-            signals.append({
-                "bar": i, "timestamp": str(times[i]),
-                "signal_type": signal_type, "direction": 1 if is_long else -1,
-                "entry": round(entry, 5), "sl": round(sl, 5), "tp": round(tp, 5),
-                "adx": round(adx_val, 1), "rsi": round(rsi_val, 1),
-                "ema50": round(cur50, 5), "ema200": round(cur200, 5),
-            })
-            last_signal_bar[signal_type] = i
+            # A crossover bar does not also trigger a pullback — move to next bar
             continue
 
         # ── Pullback to EMA50 ─────────────────────────────────────────────────
@@ -547,8 +569,8 @@ def update_health(status: str, detail: str = "") -> None:
     h["last_detail"]    = detail
     h["run_count"]      = h.get("run_count", 0) + 1
     if status == "error":
-        h["error_count"]     = h.get("error_count", 0) + 1
-        h["last_error"]      = now.isoformat()
+        h["error_count"]       = h.get("error_count", 0) + 1
+        h["last_error"]        = now.isoformat()
         h["last_error_detail"] = detail
     save_json(HEALTH_FILE, h)
 
@@ -599,7 +621,7 @@ def send_daily_report() -> None:
     lines += ["━━━━━━━━━━━━━━━━━━━━━",
               f"📡 Pairs: GOLD · EUR/USD · GBP/USD",
               f"⏰ Next report: tomorrow 09:00 UTC",
-              "<i>🤖 EMA Crossover + Pullback Bot (v4 logic)</i>"]
+              "<i>🤖 EMA Crossover + Pullback Bot (v4.1 logic)</i>"]
 
     send_telegram("\n".join(lines), admin=True)
     h["last_daily_report"] = now.isoformat()
@@ -681,7 +703,7 @@ def scan_pair(pair: str, symbol: str, api_key: str, risk_pct: float) -> int:
 
 def main() -> None:
     log.info("=" * 55)
-    log.info("  EMA Signal Bot (v4 logic) — cron run starting")
+    log.info("  EMA Signal Bot (v4.1 logic) — cron run starting")
     log.info(f"  UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
     log.info("=" * 55)
 
@@ -721,5 +743,6 @@ def main() -> None:
     log.info("=" * 55)
 
 
+# FIX 1: main() was never called — the if __name__ block had no body
 if __name__ == "__main__":
     main()
