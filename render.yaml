@@ -1,13 +1,18 @@
 services:
-  - type: cron-job
-    name: multi-asset-ema-bot
-    schedule: "*/3 * * * *"  # Every 3 minutes
+  - type: cron
+    name: ema-signal-bot
+    runtime: python
+    schedule: "*/15 * * * *"   # every 15 minutes
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: TELEGRAM_TOKEN
+        sync: false             # set manually in Render dashboard
+      - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: CHAT_ID
+      - key: TELEGRAM_ADMIN_CHAT_ID
         sync: false
-      - key: ALPHA_VANTAGE_API_KEY
+      - key: TWELVE_DATA_API_KEY
+        sync: false
+      - key: TWELVE_DATA_API_KEY_2
         sync: false
