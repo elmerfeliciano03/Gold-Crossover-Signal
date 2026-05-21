@@ -3,10 +3,19 @@
 EMA Crossover + Pullback Signal Bot — EUR/USD, GBP/USD, GOLD (cron edition)
 ============================================================================
 Signal logic:
-  • EUR/USD & GBP/USD: v4.6 (pullback cooldown, 0.1% proximity, RSI gate,
-                             risk cap, no volume filter)
-  • GOLD (GC=F):       v4   (0.3% proximity, Fib retrace, volume filter,
-                             RSI 40–60, ADX ≥ 20)
+  • EUR/USD & GBP/USD: v4.6
+      Crossover : EMA50 × EMA200, candle confirm, ADX ≥ 15
+      Pullback  : 4H+1H aligned, 0.1% proximity to EMA50, ADX ≥ 15,
+                  asymmetric RSI gate (long 35–55 / short 45–65),
+                  12-bar cooldown, London+NY session filter
+
+  • GOLD (GC=F): v4
+      Crossover : EMA50 × EMA200, candle confirm, volume ≥ 1.2× MA20, ADX ≥ 20
+      Pullback  : 4H+1H aligned, 0.3% proximity to EMA50, ADX ≥ 20,
+                  12-bar cooldown, session filter
+                  (no RSI filter, no Fibonacci retrace)
+
+Cooldown between same signal type on same pair: 1 hour (file-backed)
 
 Deployment: push to GitHub → connect to Render as Cron Job
   Schedule: */15 * * * *
@@ -81,7 +90,7 @@ ALLOWED_HOURS_V4        = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
 SIGNAL_FRESHNESS_BARS = 2
 
 # ── COOLDOWN (file-backed, cross-run) ─────────────────────────────────────────
-SIGNAL_COOLDOWN_HRS = 12   # hours between same signal type on same pair
+SIGNAL_COOLDOWN_HRS = 1    # hours between same signal type on same pair
 
 # ── STATE FILES ───────────────────────────────────────────────────────────────
 TRACKER_FILE = "/tmp/ema_signal_tracker.json"
