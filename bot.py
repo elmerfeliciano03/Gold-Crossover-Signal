@@ -73,11 +73,6 @@ PULLBACK_ALLOWED_HOURS_V46 = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
 # v4 (GOLD)
 ADX_MIN_V4              = 20
 PULLBACK_PROXIMITY_V4   = 0.003   # 0.3%
-PULLBACK_RSI_LOW_V4     = 40
-PULLBACK_RSI_HIGH_V4    = 60
-PULLBACK_RETRACE_MIN    = 0.28
-PULLBACK_RETRACE_MAX    = 0.58
-PULLBACK_SWING_BARS     = 96
 VOLUME_FILTER_ENABLED   = True
 ALLOWED_HOURS_V4        = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
 
@@ -439,7 +434,7 @@ def detect_signals_v4(df: pd.DataFrame,
 
     signals: list[dict] = []
     last_sig_bar: dict[str, int] = {}
-    min_bar = EMA_SLOW + PULLBACK_SWING_BARS + 5
+    min_bar = EMA_SLOW + 5
 
     for i in range(min_bar, len(df)):
         lcc = i - 1
@@ -499,23 +494,6 @@ def detect_signals_v4(df: pd.DataFrame,
             continue
 
         if abs(px - c50) / c50 > PULLBACK_PROXIMITY_V4:
-            continue
-
-        if not (PULLBACK_RSI_LOW_V4 <= rsi_v <= PULLBACK_RSI_HIGH_V4):
-            continue
-
-        sw_start     = max(0, lcc - PULLBACK_SWING_BARS)
-        swing_high   = highs[sw_start:lcc+1].max()
-        swing_low    = lows[sw_start:lcc+1].min()
-        swing_range  = swing_high - swing_low
-
-        if swing_range <= 0:
-            continue
-
-        retrace = (swing_high - px) / swing_range if is_long_pb \
-                  else (px - swing_low) / swing_range
-
-        if not (PULLBACK_RETRACE_MIN <= retrace <= PULLBACK_RETRACE_MAX):
             continue
 
         pb_type = "PULLBACK_LONG" if is_long_pb else "PULLBACK_SHORT"
@@ -705,7 +683,7 @@ def scan_pair(pair: str, yf_symbol: str, display: str,
     """
     log.info(f"\n{'─'*45}\n🔍 {pair} ({yf_symbol})  logic={logic_ver}")
 
-    min_bars = EMA_SLOW + PULLBACK_SWING_BARS + 20  # generous minimum
+    min_bars = EMA_SLOW + 20  # generous minimum
 
     df = fetch_15m(yf_symbol)
     if df.empty or len(df) < min_bars:
