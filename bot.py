@@ -5,13 +5,13 @@ EMA Crossover + Pullback Signal Bot — EUR/USD, GBP/USD, GOLD (cron edition)
 Signal logic:
   • EUR/USD & GBP/USD: v4.6
       Crossover : EMA50 × EMA200, candle confirm, ADX ≥ 15
-      Pullback  : 4H+1H aligned, 0.1% proximity to EMA50, ADX ≥ 15,
+      Pullback  : 4H+1H aligned, 0.05% proximity to EMA50, ADX ≥ 15,
                   asymmetric RSI gate (long 35–55 / short 45–65),
                   12-bar cooldown, London+NY session filter
 
   • GOLD (GC=F): v4
       Crossover : EMA50 × EMA200, candle confirm, volume ≥ 1.2× MA20, ADX ≥ 20
-      Pullback  : 4H+1H aligned, 0.3% proximity to EMA50, ADX ≥ 20,
+      Pullback  : 4H+1H aligned, 0.05% proximity to EMA50, ADX ≥ 20,
                   12-bar cooldown, session filter
                   (no RSI filter, no Fibonacci retrace)
 
@@ -71,7 +71,7 @@ CANDLE_CONFIRM = True
 
 # v4.6 (EURUSD / GBPUSD)
 ADX_MIN_V46               = 15
-PULLBACK_PROXIMITY_V46    = 0.0005   # 0.1%
+PULLBACK_PROXIMITY_V46    = 0.0005   # 0.05%
 PULLBACK_COOLDOWN_BARS    = 12
 PULLBACK_LONG_RSI_LO      = 35
 PULLBACK_LONG_RSI_HI      = 55
@@ -81,7 +81,7 @@ PULLBACK_ALLOWED_HOURS_V46 = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
 
 # v4 (GOLD)
 ADX_MIN_V4              = 20
-PULLBACK_PROXIMITY_V4   = 0.001   # 0.3%
+PULLBACK_PROXIMITY_V4   = 0.0005   # 0.3%
 VOLUME_FILTER_ENABLED   = True
 ALLOWED_HOURS_V4        = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
 
