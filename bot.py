@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-EMA Crossover + Pullback Signal Bot — EUR/USD, GBP/USD, GOLD (cron edition)
-============================================================================
+EMA Crossover + Pullback Signal Bot — EUR/USD, GBP/USD, GOLD, QQQ, SPY (cron edition)
+=======================================================================================
 Signal logic:
   • EUR/USD & GBP/USD: v4.6
       Crossover : EMA50 × EMA200, candle confirm, ADX ≥ 15
@@ -14,6 +14,15 @@ Signal logic:
       Pullback  : 4H+1H aligned, 0.05% proximity to EMA50, ADX ≥ 20,
                   12-bar cooldown, session filter
                   (no RSI filter, no Fibonacci retrace)
+
+  • QQQ & SPY: v46_eq (US Equity ETFs)
+      Crossover : EMA50 × EMA200, candle confirm, volume ≥ 1.2× MA20, ADX ≥ 15
+      Pullback  : 4H+1H aligned, 0.1% proximity to EMA50, ADX ≥ 15,
+                  asymmetric RSI gate (long 35–55 / short 45–65),
+                  12-bar cooldown, US session filter (13–20 UTC)
+      Notes     : US market hours only (covers 09:30–16:00 ET in both EST/EDT).
+                  Volume filter always active — equity volume data is reliable.
+                  Prices displayed to 2 decimal places (dollars/points).
 
 Cooldown between same signal type on same pair: 1 hour (file-backed)
 
@@ -62,28 +71,39 @@ PAIRS = {
     "EURUSD": ("EURUSD=X", "EUR/USD", 1.00, "v46"),
     "GBPUSD": ("GBPUSD=X", "GBP/USD", 1.00, "v46"),
     "GOLD":   ("GC=F",     "GOLD",    1.50, "v4"),
+    "QQQ":    ("QQQ",      "QQQ",     1.00, "v46_eq"),   # Invesco QQQ Trust
+    "SPY":    ("SPY",      "SPY",     1.00, "v46_eq"),   # SPDR S&P 500 ETF
 }
 
 # ── SHARED SIGNAL PARAMETERS ──────────────────────────────────────────────────
-EMA_FAST      = 50
-EMA_SLOW      = 200
+EMA_FAST       = 50
+EMA_SLOW       = 200
 CANDLE_CONFIRM = True
 
 # v4.6 (EURUSD / GBPUSD)
-ADX_MIN_V46               = 15
-PULLBACK_PROXIMITY_V46    = 0.001   # 0.05%
-PULLBACK_COOLDOWN_BARS    = 12
-PULLBACK_LONG_RSI_LO      = 35
-PULLBACK_LONG_RSI_HI      = 55
-PULLBACK_SHORT_RSI_LO     = 45
-PULLBACK_SHORT_RSI_HI     = 65
+ADX_MIN_V46                = 15
+PULLBACK_PROXIMITY_V46     = 0.001   # 0.10%
+PULLBACK_COOLDOWN_BARS     = 12
+PULLBACK_LONG_RSI_LO       = 35
+PULLBACK_LONG_RSI_HI       = 55
+PULLBACK_SHORT_RSI_LO      = 45
+PULLBACK_SHORT_RSI_HI      = 65
 PULLBACK_ALLOWED_HOURS_V46 = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
 
 # v4 (GOLD)
-ADX_MIN_V4              = 20
-PULLBACK_PROXIMITY_V4   = 0.002   # 0.3%
-VOLUME_FILTER_ENABLED   = True
-ALLOWED_HOURS_V4        = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
+ADX_MIN_V4             = 20
+PULLBACK_PROXIMITY_V4  = 0.002   # 0.20%
+VOLUME_FILTER_ENABLED  = True
+ALLOWED_HOURS_V4       = {6,7,8,9,10,11,12,13,14,15,16,17,18,19,21,22}
+
+# v46_eq (QQQ / SPY) ── NEW ───────────────────────────────────────────────────
+ADX_MIN_V46_EQ             = 15
+PULLBACK_PROXIMITY_V46_EQ  = 0.001   # 0.10%  (ETFs less noisy than spot FX)
+VOLUME_FILTER_V46_EQ       = True    # equity volume is reliable
+VOLUME_MULT_V46_EQ         = 1.2     # must exceed 1.2× 20-bar MA
+# US market hours in UTC: 13:30–20:00 ET.
+# Using 13–20 to cover both EDT (UTC-4) and EST (UTC-5) year-round.
+ALLOWED_HOURS_V46_EQ       = {13, 14, 15, 16, 17, 18, 19, 20}
 
 # ── FRESHNESS (cron safety) ───────────────────────────────────────────────────
 # Only alert signals on the last N bars (guards against stale cron execution)
@@ -423,8 +443,8 @@ def detect_signals_v4(df: pd.DataFrame,
       EMA50 × EMA200, candle confirm, volume spike (1.2× MA20), ADX ≥ 20.
 
     PULLBACK_LONG / PULLBACK_SHORT:
-      4H+1H aligned, price within 0.3% of EMA50, ADX ≥ 20,
-      RSI 40–60, Fibonacci retrace 28–58%.
+      4H+1H aligned, price within 0.2% of EMA50, ADX ≥ 20,
+      RSI 40–60, 12-bar cooldown, session filter.
     """
     closes  = df["Close"].values
     highs   = df["High"].values
@@ -527,6 +547,135 @@ def detect_signals_v4(df: pd.DataFrame,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL DETECTION — v46_eq (QQQ / SPY)   ← NEW
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_signals_v46_eq(df: pd.DataFrame,
+                            trend_4h: str,
+                            trend_1h: str) -> pd.DataFrame:
+    """
+    v46_eq signal logic for US Equity ETFs (QQQ, SPY).
+
+    Combines v4.6 RSI asymmetric gate with v4 volume filter.
+    US market session filter: 13–20 UTC (covers 09:30–16:00 ET).
+
+    BULLISH_CROSSOVER / BEARISH_CROSSOVER:
+      EMA50 × EMA200, candle confirm, volume ≥ 1.2× MA20, ADX ≥ 15.
+
+    PULLBACK_LONG / PULLBACK_SHORT:
+      4H+1H aligned, price within 0.1% of EMA50, ADX ≥ 15,
+      asymmetric RSI gate (long 35–55 / short 45–65),
+      12-bar cooldown, US session filter.
+    """
+    closes  = df["Close"].values
+    highs   = df["High"].values
+    lows    = df["Low"].values
+    volumes = df["Volume"].values
+    times   = df.index
+
+    ema50  = ema_series(closes, EMA_FAST)
+    ema200 = ema_series(closes, EMA_SLOW)
+    adx    = adx_series(highs, lows, closes, 14)
+    rsi    = rsi_series(closes, 14)
+    vol_ma_arr = volume_ma(volumes, 20)
+
+    has_vol = volumes.sum() > 0
+
+    signals: list[dict] = []
+    last_sig_bar: dict[str, int] = {}
+    min_bar = EMA_SLOW + 5
+
+    for i in range(min_bar, len(df)):
+        lcc = i - 1
+
+        # US session gate applies to all signal types for equities
+        if times[i].hour not in ALLOWED_HOURS_V46_EQ:
+            continue
+
+        c50 = ema50[lcc];  p50 = ema50[lcc-1]
+        c200= ema200[lcc]; p200= ema200[lcc-1]
+        adx_v = adx[lcc];  rsi_v = rsi[lcc]
+        px    = closes[lcc]
+
+        if np.isnan(c200) or np.isnan(c50):
+            continue
+        if adx_v < ADX_MIN_V46_EQ:
+            continue
+
+        # ── Crossover ─────────────────────────────────────────────────────────
+        bull_x = (p50 < p200) and (c50 > c200)
+        bear_x = (p50 > p200) and (c50 < c200)
+
+        if bull_x or bear_x:
+            is_long = bull_x
+            stype   = "BULLISH_CROSSOVER" if is_long else "BEARISH_CROSSOVER"
+
+            if CANDLE_CONFIRM:
+                if is_long     and not (px > c50 and px > c200): continue
+                if not is_long and not (px < c50 and px < c200): continue
+
+            # Volume confirmation — always applied for equities
+            if VOLUME_FILTER_V46_EQ and has_vol and vol_ma_arr[lcc] > 0:
+                if volumes[lcc] < VOLUME_MULT_V46_EQ * vol_ma_arr[lcc]:
+                    continue
+
+            if (i - last_sig_bar.get(stype, -9999)) < PULLBACK_COOLDOWN_BARS:
+                continue
+
+            entry = px
+            sl    = entry * (1-0.005) if is_long else entry * (1+0.005)
+            tp    = entry * (1+0.010) if is_long else entry * (1-0.010)
+            signals.append({
+                "bar": lcc, "timestamp": times[lcc],
+                "signal_type": stype,
+                "direction": 1 if is_long else -1,
+                "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2),
+                "adx": round(adx_v, 1), "rsi": round(rsi_v, 1),
+                "ema50": round(c50, 2), "ema200": round(c200, 2),
+            })
+            last_sig_bar[stype] = i
+            continue
+
+        # ── Pullback ──────────────────────────────────────────────────────────
+        if trend_4h == "NEUTRAL" or trend_1h == "NEUTRAL":
+            continue
+
+        is_long_pb  = (trend_4h == "BULLISH" and trend_1h == "BULLISH")
+        is_short_pb = (trend_4h == "BEARISH" and trend_1h == "BEARISH")
+        if not (is_long_pb or is_short_pb):
+            continue
+
+        if abs(px - c50) / c50 > PULLBACK_PROXIMITY_V46_EQ:
+            continue
+
+        # Asymmetric RSI gate (same thresholds as v4.6 FX)
+        if is_long_pb  and not (PULLBACK_LONG_RSI_LO  <= rsi_v <= PULLBACK_LONG_RSI_HI):
+            continue
+        if is_short_pb and not (PULLBACK_SHORT_RSI_LO <= rsi_v <= PULLBACK_SHORT_RSI_HI):
+            continue
+
+        pb_type = "PULLBACK_LONG" if is_long_pb else "PULLBACK_SHORT"
+
+        if (i - last_sig_bar.get(pb_type, -9999)) < PULLBACK_COOLDOWN_BARS:
+            continue
+
+        entry = px
+        sl    = entry * (1-0.005) if is_long_pb else entry * (1+0.005)
+        tp    = entry * (1+0.010) if is_long_pb else entry * (1-0.010)
+        signals.append({
+            "bar": lcc, "timestamp": times[lcc],
+            "signal_type": pb_type,
+            "direction": 1 if is_long_pb else -1,
+            "entry": round(entry, 2), "sl": round(sl, 2), "tp": round(tp, 2),
+            "adx": round(adx_v, 1), "rsi": round(rsi_v, 1),
+            "ema50": round(c50, 2), "ema200": round(c200, 2),
+        })
+        last_sig_bar[pb_type] = i
+
+    return pd.DataFrame(signals)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MESSAGE FORMATTING
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -537,9 +686,15 @@ SIGNAL_LABELS = {
     "PULLBACK_SHORT":    ("📉", "🔴 PULLBACK SHORT", "Pullback to EMA50 in downtrend"),
 }
 
+# Equity ETF pairs that use dollar/point display
+EQUITY_PAIRS = {"QQQ", "SPY"}
 
-def fmt_price(price: float) -> str:
-    return f"{price:.2f}" if price > 10 else f"{price:.5f}"
+
+def fmt_price(price: float, is_equity: bool = False) -> str:
+    """Format price to 2dp for equities/gold, 5dp for FX."""
+    if is_equity or price > 10:
+        return f"{price:.2f}"
+    return f"{price:.5f}"
 
 
 def format_signal_message(pair: str, display: str, sig: dict,
@@ -551,10 +706,20 @@ def format_signal_message(pair: str, display: str, sig: dict,
     adx_v, rsi_v       = sig["adx"], sig["rsi"]
     ema50, ema200      = sig["ema50"], sig["ema200"]
 
-    # Pip / point size for display
+    is_equity = pair in EQUITY_PAIRS
     is_gold   = pair == "GOLD"
-    unit      = "pts" if is_gold else "pips"
-    pip_size  = 0.1 if is_gold else 0.0001
+
+    # Unit and pip/point size for SL/TP distance display
+    if is_equity:
+        unit     = "pts"
+        pip_size = 0.01   # cents per point for ETFs
+    elif is_gold:
+        unit     = "pts"
+        pip_size = 0.1
+    else:
+        unit     = "pips"
+        pip_size = 0.0001
+
     sl_dist   = round(abs(entry - sl) / pip_size)
     tp_dist   = round(abs(tp - entry) / pip_size)
 
@@ -567,6 +732,8 @@ def format_signal_message(pair: str, display: str, sig: dict,
 
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+    fp = lambda p: fmt_price(p, is_equity)
+
     return (
         f"{arrow} <b>{display} — {label}</b> {arrow}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -575,14 +742,14 @@ def format_signal_message(pair: str, display: str, sig: dict,
         f"🔬 <b>Logic:</b> {logic_ver}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ <b>Trade Levels</b>\n"
-        f"• Entry:       <code>{fmt_price(entry)}</code>\n"
-        f"• Stop Loss:   <code>{fmt_price(sl)}</code>  ({sl_dist} {unit})\n"
-        f"• Take Profit: <code>{fmt_price(tp)}</code>  ({tp_dist} {unit})\n"
+        f"• Entry:       <code>{fp(entry)}</code>\n"
+        f"• Stop Loss:   <code>{fp(sl)}</code>  ({sl_dist} {unit})\n"
+        f"• Take Profit: <code>{fp(tp)}</code>  ({tp_dist} {unit})\n"
         f"• R:R          1:{RR:.0f}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"📐 <b>Indicators</b>\n"
-        f"• EMA50:  <code>{fmt_price(ema50)}</code>\n"
-        f"• EMA200: <code>{fmt_price(ema200)}</code>\n"
+        f"• EMA50:  <code>{fp(ema50)}</code>\n"
+        f"• EMA200: <code>{fp(ema200)}</code>\n"
         f"• ADX:    <code>{adx_v:.1f}</code>\n"
         f"• RSI:    <code>{rsi_v:.1f}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -656,7 +823,7 @@ def send_daily_report(total_sent: int) -> None:
             lines.append(f"  {e} {pair_label} — {st_label}")
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━",
-        "📡 Pairs: EUR/USD (v4.6) | GBP/USD (v4.6) | GOLD (v4)",
+        "📡 Pairs: EUR/USD (v4.6) | GBP/USD (v4.6) | GOLD (v4) | QQQ (v46_eq) | SPY (v46_eq)",
         "⏰ Next report: tomorrow 09:00 UTC",
         "<i>🤖 EMA Crossover + Pullback Bot</i>",
     ]
@@ -712,6 +879,8 @@ def scan_pair(pair: str, yf_symbol: str, display: str,
     # Choose signal detector based on logic version
     if logic_ver == "v4":
         signals_df = detect_signals_v4(df, trend_4h, trend_1h)
+    elif logic_ver == "v46_eq":
+        signals_df = detect_signals_v46_eq(df, trend_4h, trend_1h)
     else:
         signals_df = detect_signals_v46(df, trend_4h, trend_1h)
 
